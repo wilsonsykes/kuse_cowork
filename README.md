@@ -38,6 +38,9 @@ Full support for Model Context Protocol (MCP) for seamless tool integration.
 - **🧩 Skills**: Extensible skill system for custom capabilities
 - **🔗 MCP**: Model Context Protocol support for tool integration
 
+## Security Note
+This is still an early project and please be super careful when connecting with your local folders.
+
 ## 🚀 Quick Start
 
 Get up and running in minutes:
@@ -73,6 +76,7 @@ Will update to a clean release build soon.
 - *"Organize my folders"*
 - *"Read all the receipts and make an expense reports"*
 - *"Summarize the meeting notes and give me all the TODOs."*
+
 
 ---
 
