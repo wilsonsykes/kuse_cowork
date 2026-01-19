@@ -14,6 +14,8 @@ pub enum DbError {
     Lock,
 }
 
+use std::collections::HashMap;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub api_key: String,
@@ -21,6 +23,19 @@ pub struct Settings {
     pub base_url: String,
     pub max_tokens: u32,
     pub temperature: f32,
+    /// Provider ID (e.g., "anthropic", "ollama", "openrouter")
+    /// If empty, will be inferred automatically from model
+    #[serde(default)]
+    pub provider: String,
+    /// Provider-specific API keys
+    #[serde(default)]
+    pub provider_keys: HashMap<String, String>,
+    /// Optional OpenAI Organization ID
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_organization: Option<String>,
+    /// Optional OpenAI Project ID
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_project: Option<String>,
 }
 
 impl Default for Settings {
@@ -31,7 +46,64 @@ impl Default for Settings {
             base_url: "https://api.anthropic.com".to_string(),
             max_tokens: 4096,
             temperature: 0.7,
+            provider: "anthropic".to_string(),
+            provider_keys: HashMap::new(),
+            openai_organization: None,
+            openai_project: None,
         }
+    }
+}
+
+impl Settings {
+    /// Automatically infer provider from model (if not set)
+    pub fn get_provider(&self) -> String {
+        if !self.provider.is_empty() {
+            return self.provider.clone();
+        }
+
+        // Infer from model name
+        let model_lower = self.model.to_lowercase();
+
+        if model_lower.contains("claude") {
+            "anthropic".to_string()
+        } else if (model_lower.contains("gpt") || model_lower.starts_with("o1") || model_lower.starts_with("o3") || model_lower.starts_with("gpt-")) && !model_lower.contains("/") {
+            // OpenAI models: gpt-*, o1-*, o3-*
+            "openai".to_string()
+        } else if model_lower.contains("gemini") {
+            "google".to_string()
+        } else if model_lower.contains("minimax") {
+            "minimax".to_string()
+        } else if model_lower.starts_with("anthropic/") || model_lower.starts_with("openai/") || model_lower.starts_with("meta-llama/") || model_lower.starts_with("deepseek/") {
+            "openrouter".to_string()
+        } else if model_lower.contains(":") {
+            // Ollama format (e.g., llama3.3:latest)
+            "ollama".to_string()
+        } else {
+            // Default to anthropic
+            "anthropic".to_string()
+        }
+    }
+
+    /// Check if it's a local service that doesn't require API Key
+    /// Only returns true for known local inference services with authType === "none"
+    pub fn is_local_provider(&self) -> bool {
+        let provider = self.get_provider();
+        // Only these providers truly don't need API keys
+        matches!(provider.as_str(), "ollama" | "localai" | "vllm" | "tgi" | "sglang" | "lm-studio")
+    }
+
+    /// Check if API key can be empty (local providers or custom with empty key)
+    pub fn allows_empty_api_key(&self) -> bool {
+        // Known local providers don't need API key
+        if self.is_local_provider() {
+            return true;
+        }
+        // Custom provider with localhost URL - API key is optional
+        let provider = self.get_provider();
+        if provider == "custom" {
+            return true;
+        }
+        false
     }
 }
 
@@ -204,7 +276,26 @@ impl Database {
                 "base_url" => settings.base_url = value,
                 "max_tokens" => settings.max_tokens = value.parse().unwrap_or(4096),
                 "temperature" => settings.temperature = value.parse().unwrap_or(0.7),
+                "provider" => settings.provider = value,
+                "provider_keys" => {
+                    // Parse JSON to HashMap
+                    if let Ok(keys) = serde_json::from_str::<HashMap<String, String>>(&value) {
+                        settings.provider_keys = keys;
+                    }
+                }
                 _ => {}
+            }
+        }
+
+        // If provider is empty, infer from model
+        if settings.provider.is_empty() {
+            settings.provider = settings.get_provider();
+        }
+
+        // If api_key is empty but we have a provider_key for current provider, use it
+        if settings.api_key.is_empty() {
+            if let Some(key) = settings.provider_keys.get(&settings.provider) {
+                settings.api_key = key.clone();
             }
         }
 
@@ -214,18 +305,31 @@ impl Database {
     pub fn save_settings(&self, settings: &Settings) -> Result<(), DbError> {
         let conn = self.conn.lock().map_err(|_| DbError::Lock)?;
 
+        // If provider is empty, infer automatically
+        let provider = if settings.provider.is_empty() {
+            settings.get_provider()
+        } else {
+            settings.provider.clone()
+        };
+
+        // Serialize provider_keys to JSON
+        let provider_keys_json = serde_json::to_string(&settings.provider_keys)
+            .unwrap_or_else(|_| "{}".to_string());
+
         let pairs = [
-            ("api_key", &settings.api_key),
-            ("model", &settings.model),
-            ("base_url", &settings.base_url),
-            ("max_tokens", &settings.max_tokens.to_string()),
-            ("temperature", &settings.temperature.to_string()),
+            ("api_key", settings.api_key.clone()),
+            ("model", settings.model.clone()),
+            ("base_url", settings.base_url.clone()),
+            ("max_tokens", settings.max_tokens.to_string()),
+            ("temperature", settings.temperature.to_string()),
+            ("provider", provider),
+            ("provider_keys", provider_keys_json),
         ];
 
         for (key, value) in pairs {
             conn.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-                [key, value],
+                [key, &value],
             )?;
         }
 

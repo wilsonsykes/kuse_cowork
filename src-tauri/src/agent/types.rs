@@ -15,6 +15,9 @@ pub struct ToolUse {
     pub id: String,
     pub name: String,
     pub input: serde_json::Value,
+    /// Thought signature from Google Gemini 3 (required for function calling)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Tool result to send back to Claude
@@ -26,6 +29,9 @@ pub struct ToolResult {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+    /// Thought signature from Google Gemini 3 (required for function response)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 impl ToolResult {
@@ -35,6 +41,7 @@ impl ToolResult {
             tool_use_id,
             content,
             is_error: None,
+            thought_signature: None,
         }
     }
 
@@ -44,6 +51,7 @@ impl ToolResult {
             tool_use_id,
             content: error,
             is_error: Some(true),
+            thought_signature: None,
         }
     }
 }
@@ -59,6 +67,9 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Thought signature from Google Gemini 3 (required for function calling)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
 }
 

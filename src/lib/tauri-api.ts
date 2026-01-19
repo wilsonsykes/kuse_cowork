@@ -4,10 +4,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 // Types matching Rust structs
 export interface Settings {
-  api_key: string;
+  api_key: string;  // Legacy field, kept for compatibility
   model: string;
   base_url: string;
   max_tokens: number;
+  temperature: number;
+  provider_keys: Record<string, string>;  // Provider-specific API keys
+  openai_organization?: string;  // Optional OpenAI Organization ID
+  openai_project?: string;  // Optional OpenAI Project ID
 }
 
 export interface Conversation {
@@ -125,6 +129,8 @@ export async function getSettings(): Promise<Settings> {
         model: parsed.model || "claude-sonnet-4-5-20250929",
         base_url: parsed.baseUrl || "https://api.anthropic.com",
         max_tokens: parsed.maxTokens || 4096,
+        temperature: parsed.temperature ?? 0.7,
+        provider_keys: parsed.providerKeys || {},
       };
     }
     return {
@@ -132,6 +138,8 @@ export async function getSettings(): Promise<Settings> {
       model: "claude-sonnet-4-5-20250929",
       base_url: "https://api.anthropic.com",
       max_tokens: 4096,
+      temperature: 0.7,
+      provider_keys: {},
     };
   }
   return invoke<Settings>("get_settings");
@@ -146,6 +154,8 @@ export async function saveSettings(settings: Settings): Promise<void> {
         model: settings.model,
         baseUrl: settings.base_url,
         maxTokens: settings.max_tokens,
+        temperature: settings.temperature,
+        providerKeys: settings.provider_keys,
       })
     );
     return;
@@ -166,6 +176,8 @@ export async function testConnection(): Promise<string> {
       model: settings.model,
       baseUrl: settings.base_url,
       maxTokens: settings.max_tokens,
+      temperature: settings.temperature,
+      providerKeys: settings.provider_keys || {},
     };
 
     return testAIConnection(convertedSettings);
@@ -274,6 +286,8 @@ export async function sendChatMessage(
       model: settings.model,
       baseUrl: settings.base_url,
       maxTokens: settings.max_tokens,
+      temperature: settings.temperature,
+      providerKeys: settings.provider_keys || {},
     };
 
     const fullText = await sendAIMessage(messages, convertedSettings, onStream);
