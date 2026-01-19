@@ -38,6 +38,7 @@ impl AgentLoop {
         Self::new_with_provider(api_key, base_url, config, model, max_tokens, temperature, mcp_manager, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_provider(
         api_key: String,
         base_url: String,
@@ -756,7 +757,7 @@ impl AgentLoop {
                                 // Check if finished
                                 if choice.get("finish_reason").and_then(|v| v.as_str()).is_some() {
                                     // When finished, convert collected tool_calls to Claude format
-                                    for (_idx, (id, name, args)) in &current_tool_calls {
+                                    for (id, name, args) in current_tool_calls.values() {
                                         if !id.is_empty() && !name.is_empty() {
                                             let input: serde_json::Value = serde_json::from_str(args)
                                                 .unwrap_or(serde_json::json!({}));
