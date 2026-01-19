@@ -1,5 +1,5 @@
 import { Component, createSignal, createMemo, Show } from "solid-js";
-import { useSettings, AVAILABLE_MODELS, PROVIDER_PRESETS } from "../stores/settings";
+import { useSettings, AVAILABLE_MODELS, PROVIDER_PRESETS, getProviderFromModel, providerRequiresApiKey } from "../stores/settings";
 import { testConnection } from "../lib/tauri-api";
 import ModelSelector from "./ModelSelector";
 import "./Settings.css";
@@ -24,20 +24,24 @@ const Settings: Component = () => {
     if (baseUrl.includes("localhost:8080")) {
       return PROVIDER_PRESETS["localai"];
     }
-    // Other local services
+    // Other local services - use custom preset
     if (baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1")) {
       return PROVIDER_PRESETS["custom"];
     }
     return null;
   });
 
-  // Check if it's a local service (no API Key needed)
-  const isLocalProvider = createMemo(() => {
+  // Check if it's a true local service (authType === "none", no API Key needed at all)
+  const isNoAuthProvider = createMemo(() => {
     const info = currentProviderInfo();
-    if (info?.authType === "none") return true;
-    // Additional check: if baseUrl is a local address, treat as local service
-    const baseUrl = settings().baseUrl;
-    if (baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1")) {
+    return info?.authType === "none";
+  });
+
+  // Check if API key is optional (custom provider - can work with or without key)
+  const isApiKeyOptional = createMemo(() => {
+    const providerId = getProviderFromModel(settings().model);
+    // Custom provider with localhost URL - API key is optional
+    if (providerId === "custom") {
       return true;
     }
     return false;
@@ -92,8 +96,8 @@ const Settings: Component = () => {
         <div class="settings-section">
           <h3>API Configuration</h3>
 
-          {/* Local service notice */}
-          <Show when={isLocalProvider()}>
+          {/* Local service notice - only for providers that truly don't need auth */}
+          <Show when={isNoAuthProvider()}>
             <div class="local-service-notice">
               <span class="notice-icon">🏠</span>
               <div class="notice-content">
@@ -103,10 +107,15 @@ const Settings: Component = () => {
             </div>
           </Show>
 
-          {/* API Key input - only show when needed */}
-          <Show when={!isLocalProvider()}>
+          {/* API Key input - show for all providers except those with authType === "none" */}
+          <Show when={!isNoAuthProvider()}>
             <div class="form-group">
-              <label for="apiKey">API Key</label>
+              <label for="apiKey">
+                API Key
+                <Show when={isApiKeyOptional()}>
+                  <span class="optional-tag">(Optional)</span>
+                </Show>
+              </label>
               <input
                 id="apiKey"
                 type="password"
@@ -117,7 +126,14 @@ const Settings: Component = () => {
               <span class="hint">
                 <Show
                   when={currentProviderInfo()?.id === "anthropic"}
-                  fallback={<>Get API Key from {currentProviderInfo()?.name}</>}
+                  fallback={
+                    <Show
+                      when={isApiKeyOptional()}
+                      fallback={<>Get API Key from {currentProviderInfo()?.name}</>}
+                    >
+                      API key is optional for custom endpoints
+                    </Show>
+                  }
                 >
                   Get your API key from{" "}
                   <a href="https://console.anthropic.com/settings/keys" target="_blank">
@@ -138,7 +154,7 @@ const Settings: Component = () => {
               placeholder={currentProviderInfo()?.baseUrl || "https://api.example.com"}
             />
             <span class="hint">
-              {isLocalProvider()
+              {isNoAuthProvider()
                 ? "Ensure the address matches your local service configuration"
                 : "Customize proxy or compatible API address"}
             </span>
@@ -162,7 +178,7 @@ const Settings: Component = () => {
             <button
               class="test-btn"
               onClick={handleTest}
-              disabled={testing() || (!isLocalProvider() && !settings().apiKey)}
+              disabled={testing() || (!isNoAuthProvider() && !isApiKeyOptional() && !settings().apiKey)}
             >
               {testing() ? "Testing..." : "Test Connection"}
             </button>

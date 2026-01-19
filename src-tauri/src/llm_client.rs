@@ -22,6 +22,7 @@ pub enum ApiFormat {
     Anthropic,
     OpenAI,
     OpenAICompatible,
+    OpenAIResponses,  // For GPT-5 series using /v1/responses endpoint
     Google,
     Minimax,
 }
@@ -190,24 +191,39 @@ impl ProviderConfig {
     pub fn from_model(model: &str) -> Self {
         let model_lower = model.to_lowercase();
 
+        // Check OpenRouter format first (contains slash with known prefix)
+        if model_lower.starts_with("anthropic/") || model_lower.starts_with("openai/") || model_lower.starts_with("meta-llama/") || model_lower.starts_with("deepseek/") {
+            return Self::from_preset("openrouter");
+        }
+
+        // Check Ollama format (contains colon, e.g., llama3.3:latest)
+        if model_lower.contains(":") {
+            return Self::from_preset("ollama");
+        }
+
+        // Direct provider detection by model name
         if model_lower.contains("claude") {
             Self::from_preset("anthropic")
-        } else if model_lower.contains("gpt") && !model_lower.contains("/") {
+        } else if model_lower.starts_with("gpt-5") || model_lower.contains("gpt-5") {
+            // GPT-5 series uses Responses API
+            Self::from_preset_with_format("openai", ApiFormat::OpenAIResponses)
+        } else if model_lower.contains("gpt") {
             Self::from_preset("openai")
         } else if model_lower.contains("gemini") {
             Self::from_preset("google")
         } else if model_lower.contains("minimax") {
             Self::from_preset("minimax")
-        } else if model_lower.starts_with("anthropic/") || model_lower.starts_with("openai/") || model_lower.starts_with("meta-llama/") || model_lower.starts_with("deepseek/") {
-            // OpenRouter format
-            Self::from_preset("openrouter")
-        } else if model_lower.contains(":") {
-            // Ollama format (e.g., llama3.3:latest)
-            Self::from_preset("ollama")
         } else {
             // Default to Anthropic
             Self::from_preset("anthropic")
         }
+    }
+
+    /// Get preset configuration with custom API format override
+    fn from_preset_with_format(provider_id: &str, api_format: ApiFormat) -> Self {
+        let mut config = Self::from_preset(provider_id);
+        config.api_format = api_format;
+        config
     }
 }
 
@@ -268,6 +284,14 @@ impl LLMClient {
                     format!("{}/v1/chat/completions", base)
                 }
             }
+            ApiFormat::OpenAIResponses => {
+                // GPT-5 series uses Responses API endpoint
+                if base.ends_with("/v1") {
+                    format!("{}/responses", base)
+                } else {
+                    format!("{}/v1/responses", base)
+                }
+            }
             ApiFormat::Google => format!("{}/v1beta/models", base),
             ApiFormat::Minimax => format!("{}/v1/text/chatcompletion_v2", base),
         }
@@ -316,6 +340,7 @@ impl LLMClient {
         match self.provider_config.api_format {
             ApiFormat::Anthropic => self.send_anthropic(messages, model, max_tokens, temperature, false, None).await,
             ApiFormat::OpenAI | ApiFormat::OpenAICompatible => self.send_openai_compatible(messages, model, max_tokens, temperature, false, None).await,
+            ApiFormat::OpenAIResponses => self.send_openai_responses(messages, model, max_tokens, temperature, false, None).await,
             _ => Err(LLMError::UnsupportedProvider(format!("{:?}", self.provider_config.api_format))),
         }
     }
@@ -332,6 +357,7 @@ impl LLMClient {
         match self.provider_config.api_format {
             ApiFormat::Anthropic => self.send_anthropic(messages, model, max_tokens, temperature, true, Some(tx)).await,
             ApiFormat::OpenAI | ApiFormat::OpenAICompatible => self.send_openai_compatible(messages, model, max_tokens, temperature, true, Some(tx)).await,
+            ApiFormat::OpenAIResponses => self.send_openai_responses(messages, model, max_tokens, temperature, true, Some(tx)).await,
             _ => Err(LLMError::UnsupportedProvider(format!("{:?}", self.provider_config.api_format))),
         }
     }
@@ -512,6 +538,136 @@ impl LLMClient {
         Ok(full_text)
     }
 
+    /// OpenAI Responses API call (for GPT-5 series)
+    async fn send_openai_responses(
+        &self,
+        messages: Vec<Message>,
+        model: &str,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        stream: bool,
+        tx: Option<mpsc::Sender<String>>,
+    ) -> Result<String, LLMError> {
+        let url = self.get_api_endpoint();
+        let headers = self.build_headers();
+
+        // Extract system message as instructions
+        let (instructions, input_messages) = self.extract_instructions(messages);
+
+        // Build request payload for Responses API
+        let mut payload = serde_json::json!({
+            "model": model,
+            "input": input_messages.iter().map(|m| {
+                serde_json::json!({"role": m.role, "content": m.content})
+            }).collect::<Vec<_>>(),
+            "max_output_tokens": max_tokens,
+            "temperature": temperature.unwrap_or(1.0),
+            "stream": stream
+        });
+
+        // Add instructions if present
+        if let Some(instr) = instructions {
+            payload["instructions"] = serde_json::json!(instr);
+        }
+
+        let mut request = self.client.post(&url);
+        for (key, value) in headers {
+            request = request.header(&key, &value);
+        }
+
+        let response = request.json(&payload).send().await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(LLMError::Api(error_text));
+        }
+
+        if stream {
+            self.handle_responses_stream(response, tx.unwrap()).await
+        } else {
+            let data: serde_json::Value = response.json().await?;
+            Ok(Self::parse_responses_response(&data).unwrap_or_default())
+        }
+    }
+
+    /// Extract system message as instructions for Responses API
+    fn extract_instructions(&self, messages: Vec<Message>) -> (Option<String>, Vec<Message>) {
+        let mut instructions = None;
+        let mut input_messages = Vec::new();
+
+        for msg in messages {
+            if msg.role == "system" {
+                instructions = Some(msg.content);
+            } else {
+                input_messages.push(msg);
+            }
+        }
+
+        (instructions, input_messages)
+    }
+
+    /// Parse Responses API response
+    fn parse_responses_response(data: &serde_json::Value) -> Option<String> {
+        // Response format: { output: [{ type: "message", content: [{ type: "output_text", text: "..." }] }] }
+        data["output"].as_array()?
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .and_then(|msg| msg["content"].as_array())
+            .and_then(|content| content.iter().find(|c| c["type"].as_str() == Some("output_text")))
+            .and_then(|c| c["text"].as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Handle Responses API streaming response
+    async fn handle_responses_stream(
+        &self,
+        response: reqwest::Response,
+        tx: mpsc::Sender<String>,
+    ) -> Result<String, LLMError> {
+        use futures::StreamExt;
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut full_text = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].to_string();
+                buffer = buffer[pos + 1..].to_string();
+
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        continue;
+                    }
+
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                        // Handle streaming delta: event type "response.output_text.delta"
+                        if event["type"].as_str() == Some("response.output_text.delta") {
+                            if let Some(delta) = event["delta"].as_str() {
+                                full_text.push_str(delta);
+                                let _ = tx.send(full_text.clone()).await;
+                            }
+                        }
+                        // Handle response.completed for final text
+                        if event["type"].as_str() == Some("response.completed") {
+                            if let Some(final_text) = Self::parse_responses_response(&event["response"]) {
+                                if !final_text.is_empty() && final_text != full_text {
+                                    full_text = final_text;
+                                    let _ = tx.send(full_text.clone()).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(full_text)
+    }
+
     /// Check if service is reachable (for local services)
     pub async fn check_connection(&self) -> Result<bool, LLMError> {
         let base = self.base_url.trim_end_matches('/');
@@ -602,9 +758,24 @@ mod tests {
         assert_eq!(config.id, "openrouter");
         assert_eq!(config.api_format, ApiFormat::OpenAICompatible);
 
-        // GPT model
+        // GPT-4 model (uses Chat Completions API)
         let config = ProviderConfig::from_model("gpt-4o");
         assert_eq!(config.id, "openai");
         assert_eq!(config.api_format, ApiFormat::OpenAI);
+
+        // GPT-5 model (uses Responses API)
+        let config = ProviderConfig::from_model("gpt-5");
+        assert_eq!(config.id, "openai");
+        assert_eq!(config.api_format, ApiFormat::OpenAIResponses);
+
+        // GPT-5 mini model (uses Responses API)
+        let config = ProviderConfig::from_model("gpt-5-mini");
+        assert_eq!(config.id, "openai");
+        assert_eq!(config.api_format, ApiFormat::OpenAIResponses);
+
+        // GPT-5 nano model (uses Responses API)
+        let config = ProviderConfig::from_model("gpt-5-nano");
+        assert_eq!(config.id, "openai");
+        assert_eq!(config.api_format, ApiFormat::OpenAIResponses);
     }
 }

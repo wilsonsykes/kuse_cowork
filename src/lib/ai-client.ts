@@ -1,9 +1,9 @@
 import type { Settings } from "../stores/settings";
 import type { Message } from "../stores/chat";
-import { getModelInfo, PROVIDER_PRESETS, type ProviderConfig } from "../stores/settings";
+import { getModelInfo, PROVIDER_PRESETS, usesResponsesApi, type ProviderConfig } from "../stores/settings";
 
 interface AIMessage {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
 }
 
@@ -558,12 +558,151 @@ class OpenAICompatibleProvider implements AIProvider {
   }
 }
 
+// OpenAI Responses API Provider (for GPT-5 series)
+// Uses /v1/responses endpoint instead of /v1/chat/completions
+class OpenAIResponsesProvider implements AIProvider {
+  name = "openai-responses";
+
+  async sendMessage(
+    messages: AIMessage[],
+    settings: Settings,
+    onStream?: (text: string) => void
+  ): Promise<string> {
+    // Extract system message as instructions (Responses API uses separate instructions field)
+    const systemMsg = messages.find(m => m.role === "system");
+    const inputMsgs = messages.filter(m => m.role !== "system");
+
+    const body: Record<string, unknown> = {
+      model: settings.model,
+      input: inputMsgs.map(m => ({ role: m.role, content: m.content })),
+      max_output_tokens: settings.maxTokens,
+      temperature: settings.temperature ?? 1.0,
+      stream: !!onStream,
+    };
+
+    // Add instructions if system message exists
+    if (systemMsg) {
+      body.instructions = systemMsg.content;
+    }
+
+    const response = await fetch(`${settings.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${settings.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error?.message || `API error: ${response.status}`);
+    }
+
+    if (onStream) {
+      return this.handleStreamResponse(response, onStream);
+    }
+
+    const data = await response.json();
+    return this.extractText(data);
+  }
+
+  private extractText(data: Record<string, unknown>): string {
+    // Response format: { output: [{ type: "message", content: [{ type: "output_text", text: "..." }] }] }
+    const output = data.output as Array<Record<string, unknown>> | undefined;
+    if (!output) return "";
+
+    // Find the message type output item
+    const messageItem = output.find((item) => item.type === "message");
+    if (!messageItem) return "";
+
+    const content = messageItem.content as Array<Record<string, unknown>> | undefined;
+    if (!content) return "";
+
+    // Find the output_text content block
+    const textContent = content.find((c) => c.type === "output_text");
+    return (textContent?.text as string) || "";
+  }
+
+  private async handleStreamResponse(
+    response: Response,
+    onStream: (text: string) => void
+  ): Promise<string> {
+    let fullText = "";
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6);
+            if (data === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(data);
+              // Responses API streaming: event type "response.output_text.delta"
+              if (parsed.type === "response.output_text.delta" && parsed.delta) {
+                fullText += parsed.delta;
+                onStream(fullText);
+              }
+              // Also handle response.completed for final text
+              if (parsed.type === "response.completed") {
+                const finalText = this.extractText(parsed.response || {});
+                if (finalText && finalText !== fullText) {
+                  fullText = finalText;
+                  onStream(fullText);
+                }
+              }
+            } catch {
+              // Skip invalid JSON
+            }
+          }
+        }
+      }
+    }
+
+    return fullText;
+  }
+
+  async testConnection(settings: Settings): Promise<string> {
+    try {
+      const response = await fetch(`${settings.baseUrl}/v1/responses`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${settings.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: settings.model,
+          input: [{ role: "user", content: "Hi" }],
+          max_output_tokens: 10,
+        }),
+      });
+
+      if (response.ok) return "success";
+      const error = await response.json().catch(() => ({}));
+      return `Error: ${error.error?.message || response.status}`;
+    } catch (e) {
+      return `Error: ${e instanceof Error ? e.message : "Unknown error"}`;
+    }
+  }
+}
+
 // Provider registry
 const providers: Record<string, AIProvider> = {
   anthropic: new AnthropicProvider(),
   openai: new OpenAIProvider(),
   google: new GoogleProvider(),
   minimax: new MinimaxProvider(),
+  "openai-responses": new OpenAIResponsesProvider(),
 };
 
 // OpenAI-compatible service provider IDs
@@ -578,6 +717,11 @@ const openaiCompatibleProviders = [
 function getProvider(modelId: string): AIProvider {
   const modelInfo = getModelInfo(modelId);
   const providerName = modelInfo?.provider || 'anthropic';
+
+  // Check if model uses Responses API (GPT-5 series)
+  if (usesResponsesApi(modelId)) {
+    return providers["openai-responses"];
+  }
 
   // If it's an OpenAI-compatible service, use OpenAICompatibleProvider
   if (openaiCompatibleProviders.includes(providerName)) {

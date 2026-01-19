@@ -101,9 +101,10 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>) -> Result<String, 
     println!("[test_connection] base_url: {}", settings.base_url);
     println!("[test_connection] api_key length: {}", settings.api_key.len());
     println!("[test_connection] provider: {}", settings.get_provider());
-    println!("[test_connection] is_local_provider: {}", settings.is_local_provider());
+    println!("[test_connection] is_local_provider: {}, allows_empty_api_key: {}",
+        settings.is_local_provider(), settings.allows_empty_api_key());
 
-    if settings.api_key.is_empty() && !settings.is_local_provider() {
+    if settings.api_key.is_empty() && !settings.allows_empty_api_key() {
         return Ok("No API key configured".to_string());
     }
 
@@ -232,7 +233,7 @@ pub async fn send_chat_message(
 ) -> Result<String, CommandError> {
     let settings = state.db.get_settings()?;
 
-    if settings.api_key.is_empty() && !settings.is_local_provider() {
+    if settings.api_key.is_empty() && !settings.allows_empty_api_key() {
         return Err(CommandError {
             message: "API key not configured".to_string(),
         });
@@ -342,7 +343,7 @@ pub async fn run_agent(
     let settings = state.db.get_settings()?;
 
     // Check if API Key is needed (local services don't need it)
-    if settings.api_key.is_empty() && !settings.is_local_provider() {
+    if settings.api_key.is_empty() && !settings.allows_empty_api_key() {
         return Err(CommandError {
             message: "API key not configured".to_string(),
         });
@@ -437,7 +438,7 @@ pub async fn send_chat_with_tools(
 
     let settings = state.db.get_settings()?;
 
-    if settings.api_key.is_empty() && !settings.is_local_provider() {
+    if settings.api_key.is_empty() && !settings.allows_empty_api_key() {
         return Err(CommandError {
             message: "API key not configured".to_string(),
         });
@@ -789,7 +790,7 @@ pub async fn run_task_agent(
     let settings = state.db.get_settings()?;
 
     // Check if API Key is needed (local services don't need it)
-    if settings.api_key.is_empty() && !settings.is_local_provider() {
+    if settings.api_key.is_empty() && !settings.allows_empty_api_key() {
         return Err(CommandError {
             message: "API key not configured".to_string(),
         });

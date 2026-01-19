@@ -6,11 +6,12 @@ import {
 } from "../lib/tauri-api";
 
 export interface Settings {
-  apiKey: string;
+  apiKey: string;  // Current active API key (for display)
   model: string;
   baseUrl: string;
   maxTokens: number;
   temperature?: number;
+  providerKeys: Record<string, string>;  // Provider-specific API keys
 }
 
 // Provider configuration type
@@ -18,7 +19,7 @@ export interface ProviderConfig {
   id: string;
   name: string;
   baseUrl: string;
-  apiFormat: "anthropic" | "openai" | "openai-compatible" | "google" | "minimax";
+  apiFormat: "anthropic" | "openai" | "openai-compatible" | "openai-responses" | "google" | "minimax";
   authType: "none" | "bearer" | "api-key" | "query-param";
   authHeader?: string;  // Custom auth header name
   description?: string;
@@ -164,8 +165,13 @@ export const AVAILABLE_MODELS = [
   { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5", description: "Enhanced balanced model", provider: "anthropic", baseUrl: "https://api.anthropic.com" },
 
   // GPT Models (OpenAI)
-  { id: "gpt-5.2", name: "GPT 5.2", description: "Latest OpenAI model", provider: "openai", baseUrl: "https://api.openai.com" },
-  { id: "gpt-5.1-codex", name: "GPT 5.1 Codex", description: "Code-specialized model", provider: "openai", baseUrl: "https://api.openai.com" },
+  // GPT-5 series uses Responses API
+  { id: "gpt-5", name: "GPT-5", description: "Latest flagship model", provider: "openai", baseUrl: "https://api.openai.com", apiFormat: "responses" as const },
+  { id: "gpt-5-mini", name: "GPT-5 Mini", description: "Fast and efficient", provider: "openai", baseUrl: "https://api.openai.com", apiFormat: "responses" as const },
+  { id: "gpt-5-nano", name: "GPT-5 Nano", description: "Ultra-fast, lightweight", provider: "openai", baseUrl: "https://api.openai.com", apiFormat: "responses" as const },
+  // Legacy GPT models use Chat Completions API
+  { id: "gpt-4o", name: "GPT-4o", description: "Multimodal model", provider: "openai", baseUrl: "https://api.openai.com" },
+  { id: "gpt-4-turbo", name: "GPT-4 Turbo", description: "Fast GPT-4", provider: "openai", baseUrl: "https://api.openai.com" },
 
   // Gemini Models (Google)
   { id: "gemini-3-pro", name: "Gemini 3 Pro", description: "Google's latest model", provider: "google", baseUrl: "https://generativelanguage.googleapis.com" },
@@ -215,26 +221,61 @@ const DEFAULT_SETTINGS: Settings = {
   baseUrl: "https://api.anthropic.com",
   maxTokens: 4096,
   temperature: 0.7,
+  providerKeys: {},
 };
+
+// Get provider ID from model
+export function getProviderFromModel(modelId: string): string {
+  const model = AVAILABLE_MODELS.find(m => m.id === modelId);
+  return model?.provider || "anthropic";
+}
+
+// Check if a model uses the OpenAI Responses API (GPT-5 series)
+export function usesResponsesApi(modelId: string): boolean {
+  // Check if model is in AVAILABLE_MODELS with apiFormat: "responses"
+  const model = AVAILABLE_MODELS.find(m => m.id === modelId);
+  if (model && 'apiFormat' in model && model.apiFormat === "responses") {
+    return true;
+  }
+  // Fallback: detect GPT-5 models by name pattern
+  const lower = modelId.toLowerCase();
+  return lower.startsWith("gpt-5") || lower.match(/^gpt-5[\.-]/) !== null;
+}
 
 // Convert between frontend and API formats
 function fromApiSettings(api: ApiSettings): Settings {
+  const providerKeys = api.provider_keys || {};
+  const model = api.model;
+  const provider = getProviderFromModel(model);
+
+  // Get the current provider's API key
+  const apiKey = providerKeys[provider] || api.api_key || "";
+
   return {
-    apiKey: api.api_key,
+    apiKey,
     model: api.model,
     baseUrl: api.base_url,
     maxTokens: api.max_tokens,
     temperature: api.temperature ?? 0.7,
+    providerKeys,
   };
 }
 
 function toApiSettings(settings: Settings): ApiSettings {
+  // Update the providerKeys with current apiKey for current provider
+  const provider = getProviderFromModel(settings.model);
+  const providerKeys = { ...settings.providerKeys };
+  if (settings.apiKey) {
+    providerKeys[provider] = settings.apiKey;
+  }
+
   return {
     api_key: settings.apiKey,
     model: settings.model,
     base_url: settings.baseUrl,
     max_tokens: settings.maxTokens,
     temperature: settings.temperature ?? 0.7,
+    provider_keys: providerKeys,
   };
 }
 
@@ -275,6 +316,13 @@ export function getDefaultBaseUrl(modelId: string): string {
   return model?.baseUrl || "https://api.anthropic.com";
 }
 
+// Check if a provider requires API key
+export function providerRequiresApiKey(providerId: string): boolean {
+  const config = PROVIDER_PRESETS[providerId];
+  if (!config) return true;  // Unknown provider, assume needs key
+  return config.authType !== "none";
+}
+
 export function useSettings() {
   return {
     settings,
@@ -285,12 +333,25 @@ export function useSettings() {
     updateSetting: async <K extends keyof Settings>(key: K, value: Settings[K]) => {
       let newSettings = { ...settings(), [key]: value };
 
-      // Auto-update base URL when model changes (unless user has custom URL)
+      // When model changes, switch to that provider's stored API key
       if (key === 'model' && typeof value === 'string') {
         const currentModel = getModelInfo(settings().model);
         const newModel = getModelInfo(value);
+        const currentProvider = getProviderFromModel(settings().model);
+        const newProvider = getProviderFromModel(value);
 
-        // Only auto-update if current URL matches the previous model's default
+        // Save current API key to providerKeys before switching
+        if (settings().apiKey) {
+          newSettings.providerKeys = {
+            ...newSettings.providerKeys,
+            [currentProvider]: settings().apiKey,
+          };
+        }
+
+        // Load the new provider's API key
+        newSettings.apiKey = newSettings.providerKeys[newProvider] || "";
+
+        // Auto-update base URL if current URL matches the previous model's default
         if (currentModel && newModel && settings().baseUrl === currentModel.baseUrl) {
           newSettings.baseUrl = newModel.baseUrl;
         }
@@ -300,12 +361,29 @@ export function useSettings() {
       await persistSettings(newSettings);
     },
     saveAllSettings: async (newSettings: Settings) => {
+      // Save current API key to providerKeys
+      const provider = getProviderFromModel(newSettings.model);
+      if (newSettings.apiKey) {
+        newSettings.providerKeys = {
+          ...newSettings.providerKeys,
+          [provider]: newSettings.apiKey,
+        };
+      }
       setSettings(newSettings);
       await persistSettings(newSettings);
     },
-    isConfigured: () => settings().apiKey.length > 0,
+    // Check if current provider is configured (has API key or doesn't need one)
+    isConfigured: () => {
+      const provider = getProviderFromModel(settings().model);
+      if (!providerRequiresApiKey(provider)) {
+        return true;  // Local providers like Ollama don't need API key
+      }
+      return settings().apiKey.length > 0;
+    },
     loadSettings,
     getModelInfo,
     getDefaultBaseUrl,
+    getProviderFromModel,
+    providerRequiresApiKey,
   };
 }

@@ -14,6 +14,8 @@ pub enum DbError {
     Lock,
 }
 
+use std::collections::HashMap;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub api_key: String,
@@ -25,6 +27,9 @@ pub struct Settings {
     /// If empty, will be inferred automatically from model
     #[serde(default)]
     pub provider: String,
+    /// Provider-specific API keys
+    #[serde(default)]
+    pub provider_keys: HashMap<String, String>,
 }
 
 impl Default for Settings {
@@ -36,6 +41,7 @@ impl Default for Settings {
             max_tokens: 4096,
             temperature: 0.7,
             provider: "anthropic".to_string(),
+            provider_keys: HashMap::new(),
         }
     }
 }
@@ -69,15 +75,26 @@ impl Settings {
         }
     }
 
-    /// Check if it's a local service (no API Key needed)
+    /// Check if it's a local service that doesn't require API Key
+    /// Only returns true for known local inference services with authType === "none"
     pub fn is_local_provider(&self) -> bool {
-        // First check if base_url is a local address
-        if self.base_url.contains("localhost") || self.base_url.contains("127.0.0.1") {
+        let provider = self.get_provider();
+        // Only these providers truly don't need API keys
+        matches!(provider.as_str(), "ollama" | "localai" | "vllm" | "tgi" | "sglang" | "lm-studio")
+    }
+
+    /// Check if API key can be empty (local providers or custom with empty key)
+    pub fn allows_empty_api_key(&self) -> bool {
+        // Known local providers don't need API key
+        if self.is_local_provider() {
             return true;
         }
-        // Then check provider type
+        // Custom provider with localhost URL - API key is optional
         let provider = self.get_provider();
-        matches!(provider.as_str(), "ollama" | "localai" | "vllm" | "tgi" | "sglang")
+        if provider == "custom" {
+            return true;
+        }
+        false
     }
 }
 
@@ -251,6 +268,12 @@ impl Database {
                 "max_tokens" => settings.max_tokens = value.parse().unwrap_or(4096),
                 "temperature" => settings.temperature = value.parse().unwrap_or(0.7),
                 "provider" => settings.provider = value,
+                "provider_keys" => {
+                    // Parse JSON to HashMap
+                    if let Ok(keys) = serde_json::from_str::<HashMap<String, String>>(&value) {
+                        settings.provider_keys = keys;
+                    }
+                }
                 _ => {}
             }
         }
@@ -258,6 +281,13 @@ impl Database {
         // If provider is empty, infer from model
         if settings.provider.is_empty() {
             settings.provider = settings.get_provider();
+        }
+
+        // If api_key is empty but we have a provider_key for current provider, use it
+        if settings.api_key.is_empty() {
+            if let Some(key) = settings.provider_keys.get(&settings.provider) {
+                settings.api_key = key.clone();
+            }
         }
 
         Ok(settings)
@@ -273,6 +303,10 @@ impl Database {
             settings.provider.clone()
         };
 
+        // Serialize provider_keys to JSON
+        let provider_keys_json = serde_json::to_string(&settings.provider_keys)
+            .unwrap_or_else(|_| "{}".to_string());
+
         let pairs = [
             ("api_key", settings.api_key.clone()),
             ("model", settings.model.clone()),
@@ -280,6 +314,7 @@ impl Database {
             ("max_tokens", settings.max_tokens.to_string()),
             ("temperature", settings.temperature.to_string()),
             ("provider", provider),
+            ("provider_keys", provider_keys_json),
         ];
 
         for (key, value) in pairs {
