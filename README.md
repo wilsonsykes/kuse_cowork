@@ -1,3 +1,19 @@
+
+
+<div align="center">
+  <img src="public/kuse-logo.png" alt="Kuse Cowork Logo" width="200"/>
+</div>
+
+
+<br>
+
+<div align="center">
+
+[![DISCORD](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/Pp5aZjMMAC)
+
+</div>
+
+
 # Open-source Alternative for Claude Code Desktop App
 
 **Works with any models, BYOK, written in Rust** 🚀
@@ -196,6 +212,4 @@ Inspired by:
 ---
 **⭐ Star this repo if you find it useful!**
 
-<div align="center">
-  <img src="public/kuse-logo.png" alt="Kuse Cowork Logo" width="200"/>
-</div>
+
