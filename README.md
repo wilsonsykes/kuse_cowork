@@ -53,6 +53,7 @@ Full support for Model Context Protocol (MCP) for seamless tool integration.
 ### Experimental 
 -  **\[2026-01-26\]** Kuse_cowork now supports basic operations on Excel with an integrated UI.
   <img width="1196" height="805" alt="20260126-103738" src="https://github.com/user-attachments/assets/0fdc6470-7508-41c1-95ba-85bee67d25b5" />
+  
 ---
 
 
