@@ -47,9 +47,14 @@ Full support for Model Context Protocol (MCP) for seamless tool integration.
 ---
 ## 📰 News & Updates
 
-- **\[2026-01-26\]** Release of v0.0.2: Fixing issue where "start task" button actively need user to set a cloud-based api key.
-- 
+### Standard release
+- **\[2026-01-26\]** Release of v0.0.2: Fixing issue where "start task" button actively needs the user to set a cloud-based api key.
+
+### Experimental 
+-  **\[2026-01-26\]** Kuse_cowork now supports basic operations on Excel with an integrated UI.
+  <img width="1196" height="805" alt="20260126-103738" src="https://github.com/user-attachments/assets/0fdc6470-7508-41c1-95ba-85bee67d25b5" />
 ---
+
 
 ## 🚀 Features
 
