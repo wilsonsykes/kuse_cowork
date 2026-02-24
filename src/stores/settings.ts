@@ -227,9 +227,49 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 // Get provider ID from model
-export function getProviderFromModel(modelId: string): string {
+export function getProviderFromModel(modelId: string, baseUrl?: string): string {
   const model = AVAILABLE_MODELS.find(m => m.id === modelId);
-  return model?.provider || "anthropic";
+  if (model?.provider) {
+    return model.provider;
+  }
+
+  const normalizedBaseUrl = (baseUrl || "").toLowerCase();
+
+  // Infer local providers from endpoint when model is dynamic (e.g., discovered Ollama tags)
+  if (normalizedBaseUrl.includes("localhost:11434") || normalizedBaseUrl.includes("127.0.0.1:11434")) {
+    return "ollama";
+  }
+  if (normalizedBaseUrl.includes("localhost:8080") || normalizedBaseUrl.includes("127.0.0.1:8080")) {
+    return "localai";
+  }
+  if (normalizedBaseUrl.includes("localhost:30000") || normalizedBaseUrl.includes("127.0.0.1:30000")) {
+    return "sglang";
+  }
+  if (normalizedBaseUrl.includes("localhost:8000") || normalizedBaseUrl.includes("127.0.0.1:8000")) {
+    return "vllm";
+  }
+  if (normalizedBaseUrl.includes("localhost") || normalizedBaseUrl.includes("127.0.0.1")) {
+    return "custom";
+  }
+
+  const modelLower = modelId.toLowerCase();
+  if (modelLower.includes(":") && !modelLower.includes("/")) {
+    return "ollama";
+  }
+  if (modelLower.includes("gemini")) {
+    return "google";
+  }
+  if (modelLower.includes("gpt") || modelLower.startsWith("o1") || modelLower.startsWith("o3")) {
+    return "openai";
+  }
+  if (modelLower.includes("claude")) {
+    return "anthropic";
+  }
+  if (modelLower.includes("minimax")) {
+    return "minimax";
+  }
+
+  return "anthropic";
 }
 
 // Check if a model uses the OpenAI Responses API (GPT-5 series)
@@ -248,7 +288,7 @@ export function usesResponsesApi(modelId: string): boolean {
 function fromApiSettings(api: ApiSettings): Settings {
   const providerKeys = api.provider_keys || {};
   const model = api.model;
-  const provider = getProviderFromModel(model);
+  const provider = getProviderFromModel(model, api.base_url);
 
   // Get the current provider's API key
   const apiKey = providerKeys[provider] || api.api_key || "";
@@ -267,7 +307,7 @@ function fromApiSettings(api: ApiSettings): Settings {
 
 function toApiSettings(settings: Settings): ApiSettings {
   // Update the providerKeys with current apiKey for current provider
-  const provider = getProviderFromModel(settings.model);
+  const provider = getProviderFromModel(settings.model, settings.baseUrl);
   const providerKeys = { ...settings.providerKeys };
   if (settings.apiKey) {
     providerKeys[provider] = settings.apiKey;

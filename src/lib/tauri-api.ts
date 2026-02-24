@@ -168,7 +168,6 @@ export async function testConnection(): Promise<string> {
   if (!isTauri()) {
     // Web fallback - use unified AI client
     const settings = await getSettings();
-    if (!settings.api_key) return "No API key configured";
 
     const { testConnection: testAIConnection } = await import("./ai-client");
     const convertedSettings = {
