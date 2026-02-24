@@ -39,7 +39,7 @@ const Settings: Component = () => {
 
   // Check if API key is optional (custom provider - can work with or without key)
   const isApiKeyOptional = createMemo(() => {
-    const providerId = getProviderFromModel(settings().model);
+    const providerId = getProviderFromModel(settings().model, settings().baseUrl);
     // Custom provider with localhost URL - API key is optional
     if (providerId === "custom") {
       return true;

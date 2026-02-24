@@ -1141,6 +1141,11 @@ pub async fn run_task_agent(
     request: TaskAgentRequest,
 ) -> Result<String, CommandError> {
     let settings = state.db.get_settings()?;
+    let task = state.db.get_task(&request.task_id)?;
+    let effective_project_path = request
+        .project_path
+        .clone()
+        .or_else(|| task.as_ref().and_then(|t| t.project_path.clone()));
 
     // Check if API Key is needed (local services don't need it)
     if settings.api_key.is_empty() && !settings.allows_empty_api_key() {
@@ -1184,7 +1189,13 @@ pub async fn run_task_agent(
     if let Some(turns) = request.max_turns {
         config.max_turns = turns;
     }
-    config.project_path = request.project_path;
+    config.project_path = effective_project_path.clone();
+    if let Some(project_path) = &effective_project_path {
+        config.system_prompt.push_str(&format!(
+            "\n\n## Workspace Constraints\nMounted folder(s): {}\nAlways read and write files only inside mounted folder(s). Avoid temporary directories unless user explicitly asks.",
+            project_path
+        ));
+    }
 
     // Get provider info
     let provider_id = settings.get_provider();

@@ -1,7 +1,7 @@
 use crate::agent::ToolDefinition;
+use crate::tools::path_utils;
 use serde_json::json;
 use std::fs;
-use std::path::Path;
 
 pub fn definition() -> ToolDefinition {
     ToolDefinition {
@@ -102,16 +102,7 @@ fn resolve_path(path_str: &str, project_path: Option<&str>) -> Result<std::path:
 
     let path = expanded_path.as_path();
 
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else if let Some(project) = project_path {
-        Ok(Path::new(project).join(path))
-    } else {
-        // Use current directory as fallback
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|e| format!("Failed to get current directory: {}", e))
-    }
+    path_utils::resolve_path(path, project_path)
 }
 
 #[cfg(test)]

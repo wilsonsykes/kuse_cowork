@@ -6,6 +6,7 @@ pub mod file_write;
 pub mod glob;
 pub mod grep;
 pub mod list_dir;
+pub mod path_utils;
 
 use crate::agent::ToolDefinition;
 

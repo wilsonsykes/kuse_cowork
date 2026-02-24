@@ -772,13 +772,55 @@ const openaiCompatibleProviders = [
   "custom"
 ];
 
-// Get provider for a model
-function getProvider(modelId: string): AIProvider {
+function inferProvider(modelId: string, baseUrl: string): string {
   const modelInfo = getModelInfo(modelId);
-  const providerName = modelInfo?.provider || 'anthropic';
+  if (modelInfo?.provider) {
+    return modelInfo.provider;
+  }
+
+  const normalizedBaseUrl = (baseUrl || "").toLowerCase();
+  if (normalizedBaseUrl.includes("localhost:11434") || normalizedBaseUrl.includes("127.0.0.1:11434")) {
+    return "ollama";
+  }
+  if (normalizedBaseUrl.includes("localhost:8080") || normalizedBaseUrl.includes("127.0.0.1:8080")) {
+    return "localai";
+  }
+  if (normalizedBaseUrl.includes("localhost:30000") || normalizedBaseUrl.includes("127.0.0.1:30000")) {
+    return "sglang";
+  }
+  if (normalizedBaseUrl.includes("localhost:8000") || normalizedBaseUrl.includes("127.0.0.1:8000")) {
+    return "vllm";
+  }
+  if (normalizedBaseUrl.includes("localhost") || normalizedBaseUrl.includes("127.0.0.1")) {
+    return "custom";
+  }
+
+  const modelLower = modelId.toLowerCase();
+  if (modelLower.includes(":") && !modelLower.includes("/")) {
+    return "ollama";
+  }
+  if (modelLower.includes("gemini")) {
+    return "google";
+  }
+  if (modelLower.includes("gpt") || modelLower.startsWith("o1") || modelLower.startsWith("o3")) {
+    return "openai";
+  }
+  if (modelLower.includes("claude")) {
+    return "anthropic";
+  }
+  if (modelLower.includes("minimax")) {
+    return "minimax";
+  }
+
+  return "anthropic";
+}
+
+// Get provider for current settings
+function getProvider(settings: Settings): AIProvider {
+  const providerName = inferProvider(settings.model, settings.baseUrl);
 
   // Check if model uses Responses API (GPT-5 series)
-  if (usesResponsesApi(modelId)) {
+  if (usesResponsesApi(settings.model)) {
     return providers["openai-responses"];
   }
 
@@ -796,7 +838,7 @@ export async function sendMessage(
   settings: Settings,
   onStream?: (text: string) => void
 ): Promise<string> {
-  const provider = getProvider(settings.model);
+  const provider = getProvider(settings);
   const aiMessages: AIMessage[] = messages.map((m) => ({
     role: m.role,
     content: m.content,
@@ -806,7 +848,7 @@ export async function sendMessage(
 }
 
 export async function testConnection(settings: Settings): Promise<string> {
-  const provider = getProvider(settings.model);
+  const provider = getProvider(settings);
   return provider.testConnection(settings);
 }
 
