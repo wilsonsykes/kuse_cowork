@@ -28,7 +28,7 @@ pub fn definition() -> ToolDefinition {
     }
 }
 
-// Dangerous commands that should be blocked
+// Dangerous commands that should be blocked (cross-platform baseline)
 const BLOCKED_PATTERNS: &[&str] = &[
     "rm -rf /",
     "rm -rf /*",
@@ -40,6 +40,16 @@ const BLOCKED_PATTERNS: &[&str] = &[
     "curl | sh",
     "wget | bash",
     "curl | bash",
+];
+
+#[cfg(target_os = "windows")]
+const WINDOWS_BLOCKED_PATTERNS: &[&str] = &[
+    "remove-item -recurse -force c:\\",
+    "remove-item -recurse -force /",
+    "format-volume",
+    "diskpart",
+    "reg delete hk",
+    "bcdedit /delete",
 ];
 
 pub fn execute(
@@ -62,9 +72,11 @@ pub fn execute(
         .unwrap_or(60)
         .min(300);
 
+    let command_lower = command.to_lowercase();
+
     // Security check
     for pattern in BLOCKED_PATTERNS {
-        if command.contains(pattern) {
+        if command_lower.contains(&pattern.to_lowercase()) {
             return Err(format!(
                 "Command blocked for safety: contains dangerous pattern '{}'",
                 pattern
@@ -72,9 +84,19 @@ pub fn execute(
         }
     }
 
-    // Build command
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(command);
+    #[cfg(target_os = "windows")]
+    for pattern in WINDOWS_BLOCKED_PATTERNS {
+        if command_lower.contains(pattern) {
+            return Err(format!(
+                "Command blocked for safety: contains dangerous Windows pattern '{}'",
+                pattern
+            ));
+        }
+    }
+
+    // Build command with OS-appropriate shell
+    let mut cmd = build_shell_command(command);
+    let shell_name = shell_name();
 
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -94,7 +116,7 @@ pub fn execute(
     let exit_code = output.status.code().unwrap_or(-1);
 
     // Format output
-    let mut result = String::new();
+    let mut result = format!("[shell: {}]\n", shell_name);
 
     if !stdout.is_empty() {
         result.push_str(&stdout);
@@ -108,9 +130,7 @@ pub fn execute(
         result.push_str(&stderr);
     }
 
-    if exit_code != 0 {
-        result.push_str(&format!("\n[exit code: {}]", exit_code));
-    }
+    result.push_str(&format!("\n[exit code: {}]", exit_code));
 
     // Truncate if too long
     if result.len() > 50000 {
@@ -126,6 +146,38 @@ pub fn execute(
     }
 
     Ok(result)
+}
+
+fn build_shell_command(command: &str) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new("powershell");
+        cmd.arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-Command")
+            .arg(command);
+        cmd
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
+}
+
+fn shell_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "powershell"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "sh"
+    }
 }
 
 fn wait_with_timeout(
