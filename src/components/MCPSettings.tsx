@@ -25,6 +25,7 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
   // Form state
   const [formData, setFormData] = createSignal({
     name: "",
+    transport: "http" as "http" | "stdio",
     serverUrl: "",
     launchCommand: "",
     launchArgs: "",
@@ -70,6 +71,7 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
   const resetForm = () => {
     setFormData({
       name: "",
+      transport: "http" as "http" | "stdio",
       serverUrl: "",
       launchCommand: "",
       launchArgs: "",
@@ -86,6 +88,7 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
   const startEdit = (server: MCPServerConfig) => {
     setFormData({
       name: server.name,
+      transport: server.transport || "http",
       serverUrl: server.server_url || "",
       launchCommand: server.launch_command || "",
       launchArgs: (server.launch_args || []).join(" "),
@@ -110,8 +113,13 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
         return;
       }
 
-      if (!data.serverUrl.trim()) {
-        alert("Server URL is required");
+      if (data.transport === "http" && !data.serverUrl.trim()) {
+        alert("Server URL is required for HTTP transport");
+        return;
+      }
+
+      if (data.transport === "stdio" && !data.launchCommand.trim()) {
+        alert("Launch command is required for stdio transport");
         return;
       }
 
@@ -146,8 +154,8 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
       const config: MCPServerConfig = {
         id: editingServer()?.id || crypto.randomUUID(),
         name: data.name,
-        transport: "http",
-        server_url: data.serverUrl,
+        transport: data.transport,
+        server_url: data.serverUrl.trim(),
         launch_command: data.launchCommand.trim() || undefined,
         launch_args: launchArgs,
         launch_env: parsedEnv,
@@ -239,15 +247,28 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
             </div>
 
             <div class="form-group">
+              <label>Transport</label>
+              <select
+                value={formData().transport}
+                onInput={(e) => setFormData(prev => ({ ...prev, transport: e.currentTarget.value as "http" | "stdio" }))}
+              >
+                <option value="http">HTTP</option>
+                <option value="stdio">stdio (local process)</option>
+              </select>
+            </div>
+
+            <div class="form-group">
               <label>Remote MCP server URL</label>
               <input
                 type="url"
                 value={formData().serverUrl}
                 onInput={(e) => setFormData(prev => ({ ...prev, serverUrl: e.currentTarget.value }))}
-                placeholder="https://your-mcp-server.com"
+                placeholder={formData().transport === "http" ? "https://your-mcp-server.com" : "http://127.0.0.1:8787"}
               />
               <small class="hint">
-                Endpoint used for MCP HTTP transport (for local managed servers, point to localhost URL).
+                {formData().transport === "http"
+                  ? "Endpoint used for MCP HTTP transport."
+                  : "Optional HTTP endpoint when your stdio-launched server also exposes HTTP (otherwise keep empty)."}
               </small>
             </div>
 
@@ -377,8 +398,14 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
 
                     <div class="server-details">
                       <div class="detail-row">
-                        <strong>URL:</strong> {server.server_url}
+                        <strong>Transport:</strong> {server.transport || "http"}
                       </div>
+
+                      {server.server_url && (
+                        <div class="detail-row">
+                          <strong>URL:</strong> {server.server_url}
+                        </div>
+                      )}
 
                       {server.launch_command && (
                         <div class="detail-row">

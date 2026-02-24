@@ -1,6 +1,7 @@
 pub mod client;
 pub mod config;
 pub mod http_client;
+pub mod stdio_client;
 pub mod storage;
 pub mod types;
 

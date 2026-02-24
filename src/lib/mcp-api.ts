@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface MCPServerConfig {
   id: string;
   name: string;
-  transport: "http";
+  transport: "http" | "stdio";
   server_url: string;
   launch_command?: string;
   launch_args: string[];
