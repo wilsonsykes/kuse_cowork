@@ -12,6 +12,9 @@ interface ToolExecution {
   id: number;
   tool: string;
   status: "running" | "completed" | "error";
+  input?: string;
+  result?: string;
+  success?: boolean;
 }
 
 const App: Component = () => {
@@ -165,17 +168,35 @@ const App: Component = () => {
       case "tool_start":
         setToolExecutions((prev) => [
           ...prev,
-          { id: Date.now(), tool: event.tool, status: "running" },
+          {
+            id: Date.now(),
+            tool: event.tool,
+            status: "running",
+            input: JSON.stringify(event.input, null, 2),
+          },
         ]);
         break;
       case "tool_end":
         setToolExecutions((prev) => {
-          const updated = [...prev];
-          const last = updated.findLast((t: ToolExecution) => t.tool === event.tool && t.status === "running");
-          if (last) {
-            last.status = event.success ? "completed" : "error";
+          const runningIndex = [...prev]
+            .reverse()
+            .findIndex((t: ToolExecution) => t.tool === event.tool && t.status === "running");
+
+          if (runningIndex === -1) {
+            return prev;
           }
-          return updated;
+
+          const targetIndex = prev.length - 1 - runningIndex;
+          return prev.map((item, index) =>
+            index === targetIndex
+              ? {
+                  ...item,
+                  status: event.success ? "completed" : "error",
+                  result: event.result,
+                  success: event.success,
+                }
+              : item
+          );
         });
         break;
       case "done":

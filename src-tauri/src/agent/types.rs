@@ -173,6 +173,20 @@ Default image: python:3.11-alpine. Also available: ubuntu:latest, node:20, rust:
 pub fn build_system_prompt() -> String {
     let mut prompt = DEFAULT_SYSTEM_PROMPT.to_string();
 
+    #[cfg(target_os = "windows")]
+    {
+        prompt.push_str("\n\n## Platform Command Guidance (Windows)\n");
+        prompt.push_str("- Use PowerShell-compatible syntax for `bash` tool commands.\n");
+        prompt.push_str("- Prefer commands like `Get-ChildItem`, `Get-Location`, `Select-String`, `Get-Process`.\n");
+        prompt.push_str("- Avoid Unix-only syntax such as `pwd`, `ls | head`, and shell expansions that rely on `sh`.\n");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        prompt.push_str("\n\n## Platform Command Guidance (Unix-like)\n");
+        prompt.push_str("- Use `sh`-compatible command syntax for `bash` tool commands.\n");
+    }
+
     // Get available skills
     let skills = get_available_skills();
 

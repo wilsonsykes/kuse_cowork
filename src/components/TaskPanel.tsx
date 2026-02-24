@@ -12,19 +12,22 @@ interface ToolExecution {
   id: number;
   tool: string;
   status: "running" | "completed" | "error";
+  input?: string;
+  result?: string;
+  success?: boolean;
 }
 
 const TaskPanel: Component<TaskPanelProps> = (props) => {
   const getStepIcon = (status: string) => {
     switch (status) {
       case "completed":
-        return "✓";
+        return "OK";
       case "running":
-        return "●";
+        return "..";
       case "failed":
-        return "✗";
+        return "ERR";
       default:
-        return "○";
+        return "--";
     }
   };
 
@@ -73,10 +76,7 @@ const TaskPanel: Component<TaskPanelProps> = (props) => {
                   <For each={task().plan}>
                     {(step) => (
                       <div class={`plan-step ${step.status}`}>
-                        <span
-                          class="step-icon"
-                          style={{ color: getStatusColor(step.status) }}
-                        >
+                        <span class="step-icon" style={{ color: getStatusColor(step.status) }}>
                           {getStepIcon(step.status)}
                         </span>
                         <span class="step-number">{step.step}.</span>
@@ -95,12 +95,26 @@ const TaskPanel: Component<TaskPanelProps> = (props) => {
                   <For each={props.toolExecutions}>
                     {(tool) => (
                       <div class={`tool-item ${tool.status}`}>
-                        <span class="tool-name">{tool.tool}</span>
-                        <span class="tool-status-icon">
-                          {tool.status === "running" && "..."}
-                          {tool.status === "completed" && "✓"}
-                          {tool.status === "error" && "✗"}
-                        </span>
+                        <div class="tool-item-header">
+                          <span class="tool-name">{tool.tool}</span>
+                          <span class="tool-status-icon">
+                            {tool.status === "running" && "..."}
+                            {tool.status === "completed" && "OK"}
+                            {tool.status === "error" && "ERR"}
+                          </span>
+                        </div>
+                        <Show when={tool.input}>
+                          <details class="tool-details">
+                            <summary>Input</summary>
+                            <pre>{tool.input}</pre>
+                          </details>
+                        </Show>
+                        <Show when={tool.result}>
+                          <details class="tool-details" open={tool.status === "error"}>
+                            <summary>{tool.status === "error" ? "Error Output" : "Output"}</summary>
+                            <pre>{tool.result}</pre>
+                          </details>
+                        </Show>
                       </div>
                     )}
                   </For>

@@ -160,14 +160,20 @@
 
 .tool-item {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  gap: 0.5rem;
   padding: 0.5rem 0.75rem;
   border-radius: var(--radius-sm);
   font-size: 0.75rem;
   font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
   background: var(--card);
   border: 1px solid var(--border);
+}
+
+.tool-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .tool-item.running {
@@ -191,6 +197,31 @@
 .tool-status-icon {
   font-size: 0.6875rem;
   font-weight: 600;
+}
+
+.tool-details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.375rem 0.5rem;
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.tool-details summary {
+  cursor: pointer;
+  font-size: 0.6875rem;
+  color: var(--muted-foreground);
+  user-select: none;
+}
+
+.tool-details pre {
+  margin: 0.5rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.6875rem;
+  line-height: 1.45;
+  color: var(--foreground);
+  max-height: 12rem;
+  overflow: auto;
 }
 
 .tool-item.running .tool-status-icon {
