@@ -42,6 +42,7 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::test_connection,
+            commands::check_local_service_status,
             commands::list_conversations,
             commands::create_conversation,
             commands::update_conversation_title,

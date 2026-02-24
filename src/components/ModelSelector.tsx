@@ -1,5 +1,6 @@
 import { Component, For, Show, createSignal, createMemo, onMount } from "solid-js";
 import { AVAILABLE_MODELS, PROVIDER_PRESETS, ProviderConfig } from "../stores/settings";
+import { checkLocalServiceStatus, isTauri } from "../lib/tauri-api";
 import "./ModelSelector.css";
 
 // Ollama model info interface
@@ -21,6 +22,7 @@ function formatSize(bytes: number): string {
 // Format time
 function formatTime(dateStr: string): string {
   const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return "Unknown";
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
@@ -94,19 +96,30 @@ const ModelSelector: Component<ModelSelectorProps> = (props) => {
     setOllamaStatus("checking");
     try {
       const baseUrl = ollamaBaseUrl().replace(/\/$/, "");
-      const response = await fetch(`${baseUrl}/api/tags`, {
-        method: "GET",
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const models = data.models || [];
-        setOllamaModels(models);
-        setOllamaStatus("running");
+      if (isTauri()) {
+        const status = await checkLocalServiceStatus(baseUrl);
+        if (status.running) {
+          setOllamaModels(status.models || []);
+          setOllamaStatus("running");
+        } else {
+          setOllamaStatus("not-running");
+          setOllamaModels([]);
+        }
       } else {
-        setOllamaStatus("not-running");
-        setOllamaModels([]);
+        const response = await fetch(`${baseUrl}/api/tags`, {
+          method: "GET",
+          signal: AbortSignal.timeout(5000),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const models = data.models || [];
+          setOllamaModels(models);
+          setOllamaStatus("running");
+        } else {
+          setOllamaStatus("not-running");
+          setOllamaModels([]);
+        }
       }
     } catch {
       setOllamaStatus("not-running");

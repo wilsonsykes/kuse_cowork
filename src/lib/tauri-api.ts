@@ -97,6 +97,19 @@ export interface SkillMetadata {
   description: string;
 }
 
+export interface LocalModelInfo {
+  name: string;
+  size: number;
+  modified_at: string;
+  digest: string;
+}
+
+export interface LocalServiceStatus {
+  running: boolean;
+  models: LocalModelInfo[];
+  error?: string;
+}
+
 // Enhanced chat with tools
 export interface EnhancedChatRequest {
   conversation_id: string;
@@ -510,4 +523,16 @@ export async function getSkillsList(): Promise<SkillMetadata[]> {
     return [];
   }
   return invoke<SkillMetadata[]>("get_skills_list");
+}
+
+export async function checkLocalServiceStatus(baseUrl: string): Promise<LocalServiceStatus> {
+  if (!isTauri()) {
+    // Web fallback: let frontend do direct checks
+    return {
+      running: false,
+      models: [],
+      error: "Not running in Tauri",
+    };
+  }
+  return invoke<LocalServiceStatus>("check_local_service_status", { baseUrl });
 }

@@ -19,6 +19,21 @@ pub struct CommandError {
     message: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalModelInfo {
+    pub name: String,
+    pub size: u64,
+    pub modified_at: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalServiceStatus {
+    pub running: bool,
+    pub models: Vec<LocalModelInfo>,
+    pub error: Option<String>,
+}
+
 impl From<crate::database::DbError> for CommandError {
     fn from(e: crate::database::DbError) -> Self {
         CommandError {
@@ -210,6 +225,69 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>) -> Result<String, 
                 }
             }
         }
+    }
+}
+
+#[command]
+pub async fn check_local_service_status(base_url: String) -> LocalServiceStatus {
+    let client = reqwest::Client::new();
+    let base = base_url.trim_end_matches('/');
+    let normalized = base.strip_suffix("/v1").unwrap_or(base);
+    let url = format!("{}/api/tags", normalized);
+
+    let response = match client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            return LocalServiceStatus {
+                running: false,
+                models: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    if !response.status().is_success() {
+        return LocalServiceStatus {
+            running: false,
+            models: vec![],
+            error: Some(format!("HTTP {}", response.status())),
+        };
+    }
+
+    let data: serde_json::Value = match response.json().await {
+        Ok(json) => json,
+        Err(e) => {
+            return LocalServiceStatus {
+                running: false,
+                models: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let models = data["models"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|m| LocalModelInfo {
+                    name: m["name"].as_str().unwrap_or("").to_string(),
+                    size: m["size"].as_u64().unwrap_or(0),
+                    modified_at: m["modified_at"].as_str().unwrap_or("").to_string(),
+                    digest: m["digest"].as_str().unwrap_or("").to_string(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    LocalServiceStatus {
+        running: true,
+        models,
+        error: None,
     }
 }
 
