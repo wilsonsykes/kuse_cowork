@@ -1,5 +1,6 @@
 import { Component, For } from "solid-js";
 import { useChat } from "../stores/chat";
+import { useAppVersion } from "../lib/app-version";
 import "./Sidebar.css";
 
 interface SidebarProps {
@@ -9,6 +10,8 @@ interface SidebarProps {
 }
 
 const Sidebar: Component<SidebarProps> = (props) => {
+  const appVersion = useAppVersion();
+
   const {
     conversations,
     activeConversationId,
@@ -22,7 +25,13 @@ const Sidebar: Component<SidebarProps> = (props) => {
       <div class="sidebar-header">
         <div class="logo-container">
           <img src="/logo.png" alt="Kuse Cowork" class="logo-image" />
-          <h1 class="logo-text">Kuse Cowork</h1>
+          <div class="brand-block">
+            <h1 class="logo-text">Kuse Cowork</h1>
+            <div class="brand-meta">
+              <p class="logo-subtitle">by Wilson</p>
+              <span class="version-tag">{appVersion()}</span>
+            </div>
+          </div>
         </div>
         <div class="mode-tabs">
           <button

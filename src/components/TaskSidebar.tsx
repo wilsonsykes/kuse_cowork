@@ -1,5 +1,6 @@
 import { Component, For, Show } from "solid-js";
 import { Task } from "../lib/tauri-api";
+import { useAppVersion } from "../lib/app-version";
 import "./TaskSidebar.css";
 
 interface TaskSidebarProps {
@@ -13,6 +14,8 @@ interface TaskSidebarProps {
 }
 
 const TaskSidebar: Component<TaskSidebarProps> = (props) => {
+  const appVersion = useAppVersion();
+
   const getStatusIcon = (status: string) => {
     switch (status) {
       case "completed":
@@ -48,7 +51,13 @@ const TaskSidebar: Component<TaskSidebarProps> = (props) => {
       <div class="sidebar-header">
         <div class="logo-container">
           <img src="/logo.png" alt="Kuse Cowork" class="logo-image" />
-          <h1 class="app-title">Kuse Cowork</h1>
+          <div class="brand-block">
+            <h1 class="app-title">Kuse Cowork</h1>
+            <div class="brand-meta">
+              <p class="app-subtitle">by Wilson</p>
+              <span class="version-tag">{appVersion()}</span>
+            </div>
+          </div>
         </div>
       </div>
 

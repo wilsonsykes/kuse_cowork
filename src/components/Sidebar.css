@@ -19,6 +19,12 @@
   margin-bottom: 1rem;
 }
 
+.brand-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
 .logo-image {
   width: 32px;
   height: 32px;
@@ -32,6 +38,30 @@
   margin: 0;
   color: var(--primary);
   letter-spacing: -0.02em;
+}
+
+.logo-subtitle {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  line-height: 1.2;
+}
+
+.brand-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.version-tag {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0.1875rem 0.375rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  background: var(--accent);
 }
 
 .logo {
