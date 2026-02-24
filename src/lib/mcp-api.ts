@@ -3,7 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 export interface MCPServerConfig {
   id: string;
   name: string;
+  transport: "http";
   server_url: string;
+  launch_command?: string;
+  launch_args: string[];
+  launch_env: Record<string, string>;
+  working_dir?: string;
+  startup_timeout_ms?: number;
   oauth_client_id?: string;
   oauth_client_secret?: string;
   enabled: boolean;
@@ -21,9 +27,13 @@ export interface MCPTool {
 export interface MCPServerStatus {
   id: string;
   name: string;
+  transport: string;
   status: "Connected" | "Disconnected" | "Connecting" | "Error";
   tools: MCPTool[];
   last_error?: string;
+  managed_process: boolean;
+  pid?: number;
+  endpoint?: string;
 }
 
 export interface MCPToolCall {

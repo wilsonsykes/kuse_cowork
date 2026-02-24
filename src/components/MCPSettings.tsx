@@ -1,4 +1,4 @@
-import { Component, For, createSignal, onMount, createMemo } from "solid-js";
+import { Component, For, createSignal, onMount, onCleanup, createMemo } from "solid-js";
 import {
   MCPServerConfig,
   MCPServerStatus,
@@ -26,6 +26,11 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
   const [formData, setFormData] = createSignal({
     name: "",
     serverUrl: "",
+    launchCommand: "",
+    launchArgs: "",
+    launchEnv: "",
+    workingDir: "",
+    startupTimeoutMs: "20000",
     oauthClientId: "",
     oauthClientSecret: "",
   });
@@ -40,6 +45,10 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
 
   onMount(async () => {
     await refreshData();
+    const timer = window.setInterval(() => {
+      void refreshData();
+    }, 5000);
+    onCleanup(() => window.clearInterval(timer));
   });
 
   const refreshData = async () => {
@@ -62,6 +71,11 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
     setFormData({
       name: "",
       serverUrl: "",
+      launchCommand: "",
+      launchArgs: "",
+      launchEnv: "",
+      workingDir: "",
+      startupTimeoutMs: "20000",
       oauthClientId: "",
       oauthClientSecret: "",
     });
@@ -73,6 +87,13 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
     setFormData({
       name: server.name,
       serverUrl: server.server_url || "",
+      launchCommand: server.launch_command || "",
+      launchArgs: (server.launch_args || []).join(" "),
+      launchEnv: Object.keys(server.launch_env || {}).length > 0
+        ? JSON.stringify(server.launch_env, null, 2)
+        : "",
+      workingDir: server.working_dir || "",
+      startupTimeoutMs: String(server.startup_timeout_ms ?? 20000),
       oauthClientId: server.oauth_client_id || "",
       oauthClientSecret: server.oauth_client_secret || "",
     });
@@ -94,10 +115,44 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
         return;
       }
 
+      let parsedEnv: Record<string, string> = {};
+      if (data.launchEnv.trim()) {
+        try {
+          const raw = JSON.parse(data.launchEnv);
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            alert("Launch env must be a JSON object");
+            return;
+          }
+          parsedEnv = Object.fromEntries(
+            Object.entries(raw).map(([k, v]) => [k, String(v)])
+          );
+        } catch {
+          alert("Launch env JSON is invalid");
+          return;
+        }
+      }
+
+      const parsedTimeout = Number.parseInt(data.startupTimeoutMs.trim(), 10);
+      if (Number.isNaN(parsedTimeout) || parsedTimeout < 1000 || parsedTimeout > 120000) {
+        alert("Startup timeout must be between 1000 and 120000 ms");
+        return;
+      }
+
+      const launchArgs = data.launchArgs
+        .split(/\s+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
       const config: MCPServerConfig = {
         id: editingServer()?.id || crypto.randomUUID(),
         name: data.name,
+        transport: "http",
         server_url: data.serverUrl,
+        launch_command: data.launchCommand.trim() || undefined,
+        launch_args: launchArgs,
+        launch_env: parsedEnv,
+        working_dir: data.workingDir.trim() || undefined,
+        startup_timeout_ms: parsedTimeout,
         oauth_client_id: data.oauthClientId.trim() || undefined,
         oauth_client_secret: data.oauthClientSecret.trim() || undefined,
         enabled: editingServer()?.enabled ?? true,
@@ -191,7 +246,66 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
                 onInput={(e) => setFormData(prev => ({ ...prev, serverUrl: e.currentTarget.value }))}
                 placeholder="https://your-mcp-server.com"
               />
+              <small class="hint">
+                Endpoint used for MCP HTTP transport (for local managed servers, point to localhost URL).
+              </small>
             </div>
+
+            <details class="advanced-settings">
+              <summary>Managed local server launch (optional)</summary>
+              <div class="advanced-content">
+                <div class="form-group">
+                  <label>Launch command</label>
+                  <input
+                    type="text"
+                    value={formData().launchCommand}
+                    onInput={(e) => setFormData(prev => ({ ...prev, launchCommand: e.currentTarget.value }))}
+                    placeholder="npx"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>Launch args (space-separated)</label>
+                  <input
+                    type="text"
+                    value={formData().launchArgs}
+                    onInput={(e) => setFormData(prev => ({ ...prev, launchArgs: e.currentTarget.value }))}
+                    placeholder="-y @modelcontextprotocol/server-filesystem C:\\workspace"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>Working directory (optional)</label>
+                  <input
+                    type="text"
+                    value={formData().workingDir}
+                    onInput={(e) => setFormData(prev => ({ ...prev, workingDir: e.currentTarget.value }))}
+                    placeholder="C:\\path\\to\\project"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>Launch env JSON (optional)</label>
+                  <textarea
+                    rows={4}
+                    value={formData().launchEnv}
+                    onInput={(e) => setFormData(prev => ({ ...prev, launchEnv: e.currentTarget.value }))}
+                    placeholder={'{"NODE_ENV":"production"}'}
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>Startup timeout (ms)</label>
+                  <input
+                    type="number"
+                    min="1000"
+                    max="120000"
+                    value={formData().startupTimeoutMs}
+                    onInput={(e) => setFormData(prev => ({ ...prev, startupTimeoutMs: e.currentTarget.value }))}
+                  />
+                </div>
+              </div>
+            </details>
 
             <details class="advanced-settings">
               <summary>Advanced settings</summary>
@@ -266,9 +380,33 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
                         <strong>URL:</strong> {server.server_url}
                       </div>
 
+                      {server.launch_command && (
+                        <div class="detail-row">
+                          <strong>Launch:</strong> {server.launch_command} {(server.launch_args || []).join(" ")}
+                        </div>
+                      )}
+
                       {server.oauth_client_id && (
                         <div class="detail-row">
                           <strong>OAuth:</strong> Configured
+                        </div>
+                      )}
+
+                      {status?.managed_process && (
+                        <div class="detail-row">
+                          <strong>Process:</strong> PID {status.pid || "N/A"}
+                        </div>
+                      )}
+
+                      {status?.endpoint && (
+                        <div class="detail-row">
+                          <strong>Endpoint:</strong> {status.endpoint}
+                        </div>
+                      )}
+
+                      {status?.last_error && (
+                        <div class="detail-row error-row">
+                          <strong>Last error:</strong> {status.last_error}
                         </div>
                       )}
 

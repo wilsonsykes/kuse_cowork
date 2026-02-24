@@ -307,6 +307,10 @@
   color: #333;
 }
 
+.detail-row.error-row {
+  color: #b42318;
+}
+
 .server-actions {
   display: flex;
   gap: 8px;

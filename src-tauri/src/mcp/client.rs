@@ -1,8 +1,11 @@
 use super::http_client::HttpMcpClient;
 use super::types::*;
 use std::collections::HashMap;
+use std::path::Path;
 use tokio::sync::RwLock;
 use std::sync::Arc;
+use tokio::process::{Child, Command};
+use tokio::time::{sleep, Duration, Instant};
 
 pub struct MCPClient {
     http_client: HttpMcpClient,
@@ -10,9 +13,15 @@ pub struct MCPClient {
     url: String,
 }
 
+struct ManagedProcess {
+    child: Child,
+    pid: Option<u32>,
+}
+
 pub struct MCPManager {
     clients: Arc<RwLock<HashMap<String, MCPClient>>>,
     server_status: Arc<RwLock<HashMap<String, MCPServerStatus>>>,
+    managed_processes: Arc<RwLock<HashMap<String, ManagedProcess>>>,
 }
 
 impl MCPManager {
@@ -20,6 +29,7 @@ impl MCPManager {
         Self {
             clients: Arc::new(RwLock::new(HashMap::new())),
             server_status: Arc::new(RwLock::new(HashMap::new())),
+            managed_processes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -34,11 +44,24 @@ impl MCPManager {
             status_map.insert(config.id.clone(), MCPServerStatus {
                 id: config.id.clone(),
                 name: config.name.clone(),
+                transport: config.transport.clone(),
                 status: ConnectionStatus::Connecting,
                 tools: vec![],
                 last_error: None,
+                managed_process: false,
+                pid: None,
+                endpoint: if config.server_url.is_empty() { None } else { Some(config.server_url.clone()) },
             });
         }
+
+        let managed = match self.start_managed_process_if_needed(config).await {
+            Ok(pid) => pid,
+            Err(e) => {
+                let error_msg = format!("Failed to start MCP server process: {}", e);
+                self.update_status_error(&config.id, error_msg.clone()).await;
+                return Err(error_msg.into());
+            }
+        };
 
         // Create OAuth token if needed
         let oauth_token = if let (Some(client_id), Some(client_secret)) =
@@ -54,19 +77,21 @@ impl MCPManager {
             None
         };
 
+        let endpoint = if config.server_url.is_empty() {
+            return Err("Server URL is required".into());
+        } else {
+            config.server_url.clone()
+        };
+
         // Create HTTP MCP client
-        let mut http_client = HttpMcpClient::new(config.server_url.clone(), oauth_token);
+        let mut http_client = HttpMcpClient::new(endpoint.clone(), oauth_token);
 
         // Initialize the connection
-        match http_client.initialize().await {
-            Ok(_) => {
-                // Initialization successful
-            }
-            Err(e) => {
-                let error_msg = format!("Connection failed: {}", e);
-                self.update_status_error(&config.id, error_msg.clone()).await;
-                return Err(error_msg.into());
-            }
+        if let Err(e) = self.initialize_with_retry(&mut http_client, config.startup_timeout_ms).await {
+            let error_msg = format!("Connection failed: {}", e);
+            self.update_status_error(&config.id, error_msg.clone()).await;
+            self.stop_managed_process(&config.id).await;
+            return Err(error_msg.into());
         }
 
         // Discover tools
@@ -75,6 +100,7 @@ impl MCPManager {
             Err(e) => {
                 let error_msg = format!("Tool discovery failed: {}", e);
                 self.update_status_error(&config.id, error_msg.clone()).await;
+                self.stop_managed_process(&config.id).await;
                 return Err(error_msg.into());
             }
         };
@@ -82,7 +108,7 @@ impl MCPManager {
         // Store client and update status to connected
         let mcp_client = MCPClient {
             http_client,
-            url: config.server_url.clone(),
+            url: endpoint.clone(),
         };
 
         {
@@ -95,9 +121,13 @@ impl MCPManager {
             status_map.insert(config.id.clone(), MCPServerStatus {
                 id: config.id.clone(),
                 name: config.name.clone(),
+                transport: config.transport.clone(),
                 status: ConnectionStatus::Connected,
                 tools,
                 last_error: None,
+                managed_process: managed.is_some(),
+                pid: managed,
+                endpoint: Some(endpoint),
             });
         }
 
@@ -111,6 +141,8 @@ impl MCPManager {
             clients.remove(server_id);
         }
 
+        self.stop_managed_process(server_id).await;
+
         // Update status to disconnected
         {
             let mut status_map = self.server_status.write().await;
@@ -118,6 +150,8 @@ impl MCPManager {
                 status.status = ConnectionStatus::Disconnected;
                 status.tools.clear();
                 status.last_error = None;
+                status.managed_process = false;
+                status.pid = None;
             }
         }
     }
@@ -201,7 +235,110 @@ impl MCPManager {
         if let Some(status) = status_map.get_mut(server_id) {
             status.status = ConnectionStatus::Error;
             status.last_error = Some(error);
+            status.tools.clear();
         }
+    }
+
+    async fn start_managed_process_if_needed(
+        &self,
+        config: &MCPServerConfig,
+    ) -> Result<Option<u32>, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(command) = config.launch_command.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+
+        // Reuse existing managed process if still running.
+        {
+            let mut processes = self.managed_processes.write().await;
+            if let Some(proc) = processes.get_mut(&config.id) {
+                if proc.child.try_wait()?.is_none() {
+                    return Ok(proc.pid);
+                }
+                processes.remove(&config.id);
+            }
+        }
+
+        let mut cmd = Command::new(command);
+        if !config.launch_args.is_empty() {
+            cmd.args(&config.launch_args);
+        }
+
+        if !config.launch_env.is_empty() {
+            cmd.envs(&config.launch_env);
+        }
+
+        if let Some(dir) = config.working_dir.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if !Path::new(dir).exists() {
+                return Err(format!("Working directory not found: {}", dir).into());
+            }
+            cmd.current_dir(dir);
+        }
+
+        // Avoid hanging if child writes to output streams.
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to start MCP process '{}': {}", command, e))?;
+        let pid = child.id();
+
+        // Give an early failure signal if process exits immediately.
+        sleep(Duration::from_millis(250)).await;
+        if let Some(status) = child.try_wait()? {
+            return Err(format!("MCP process exited early with status {}", status).into());
+        }
+
+        let mut processes = self.managed_processes.write().await;
+        processes.insert(
+            config.id.clone(),
+            ManagedProcess {
+                child,
+                pid,
+            },
+        );
+
+        Ok(pid)
+    }
+
+    async fn stop_managed_process(&self, server_id: &str) {
+        let maybe_proc = {
+            let mut processes = self.managed_processes.write().await;
+            processes.remove(server_id)
+        };
+
+        if let Some(mut proc) = maybe_proc {
+            let _ = proc.child.kill().await;
+            let _ = proc.child.wait().await;
+        }
+    }
+
+    async fn initialize_with_retry(
+        &self,
+        client: &mut HttpMcpClient,
+        startup_timeout_ms: Option<u64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let timeout = Duration::from_millis(startup_timeout_ms.unwrap_or(20_000));
+        let started = Instant::now();
+        let mut last_error: Option<String> = None;
+
+        while started.elapsed() < timeout {
+            match client.initialize().await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(e.to_string());
+                    sleep(Duration::from_millis(600)).await;
+                }
+            }
+        }
+
+        Err(format!(
+            "Timed out after {} ms waiting for MCP server initialization{}",
+            timeout.as_millis(),
+            last_error
+                .map(|e| format!(" (last error: {})", e))
+                .unwrap_or_default()
+        )
+        .into())
     }
 
     async fn discover_tools_http(&self, client: &HttpMcpClient, server_id: &str) -> Result<Vec<MCPTool>, Box<dyn std::error::Error + Send + Sync>> {

@@ -11,7 +11,13 @@ impl MCPServerConfig {
         Self {
             id,
             name,
+            transport: "http".to_string(),
             server_url,
+            launch_command: None,
+            launch_args: vec![],
+            launch_env: std::collections::HashMap::new(),
+            working_dir: None,
+            startup_timeout_ms: None,
             oauth_client_id: None,
             oauth_client_secret: None,
             enabled: false,
