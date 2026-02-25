@@ -36,6 +36,29 @@ pub fn resolve_path(path: &Path, project_path: Option<&str>) -> Result<PathBuf, 
     }
 }
 
+pub fn resolve_path_for_write(path: &Path, project_path: Option<&str>) -> Result<PathBuf, String> {
+    let roots = parse_project_roots(project_path);
+
+    if path.is_absolute() {
+        if !roots.is_empty() && !is_within_roots(path, &roots) {
+            return Err(format!(
+                "Write path is outside mounted folder(s): {}. Allowed roots: {}",
+                path.display(),
+                format_roots(&roots)
+            ));
+        }
+        return Ok(path.to_path_buf());
+    }
+
+    if let Some(root) = roots.first() {
+        Ok(root.join(path))
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|e| format!("Failed to get current directory: {}", e))
+    }
+}
+
 fn is_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }

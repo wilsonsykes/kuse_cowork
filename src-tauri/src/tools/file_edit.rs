@@ -106,5 +106,5 @@ pub fn execute(
 
 fn resolve_path(path_str: &str, project_path: Option<&str>) -> Result<std::path::PathBuf, String> {
     let path = Path::new(path_str);
-    path_utils::resolve_path(path, project_path)
+    path_utils::resolve_path_for_write(path, project_path)
 }

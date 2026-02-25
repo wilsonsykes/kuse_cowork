@@ -20,6 +20,12 @@ pub struct CommandError {
     message: String,
 }
 
+fn default_workspace_root() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LocalModelInfo {
     pub name: String,
@@ -542,7 +548,7 @@ pub async fn run_agent(
     if let Some(turns) = request.max_turns {
         config.max_turns = turns;
     }
-    config.project_path = request.project_path;
+    config.project_path = request.project_path.or_else(default_workspace_root);
 
     // Get provider info
     let provider_id = settings.get_provider();
@@ -699,12 +705,14 @@ pub async fn send_chat_with_tools(
     // Enhanced chat with tools - use AgentLoop which supports multiple providers
     use crate::llm_client::ProviderConfig;
 
-    let tool_executor = ToolExecutor::new(request.project_path.clone())
+    let effective_project_path = request.project_path.clone().or_else(default_workspace_root);
+
+    let tool_executor = ToolExecutor::new(effective_project_path.clone())
         .with_mcp_manager(state.mcp_manager.clone());
 
     // Build agent-style config for tools
     let mut config = AgentConfig {
-        project_path: request.project_path,
+        project_path: effective_project_path.clone(),
         max_turns: 10, // Limit turns in chat mode
         ..Default::default()
     };
@@ -733,6 +741,28 @@ When the user asks you to do something that requires accessing files or running 
 For simple questions or conversations, respond directly without using tools.
 
 Be concise and helpful. Explain what you're doing when using tools.{}"#, mcp_info);
+    config.system_prompt.push_str(
+        "\n\n## Response Quality Rules\n\
+        - After any tool call, respond only with results grounded in that tool output.\n\
+        - Do not add unrelated explanations about project structure or technology stacks.\n\
+        - If the user explicitly asks to use a specific tool, execute it and return a short outcome-focused response.\n"
+    );
+    if let Some(project_path) = &effective_project_path {
+        config.system_prompt.push_str(&format!(
+            "\n\n## Workspace Constraints\nMounted folder(s): {}\nAlways read and write files only inside mounted folder(s). Avoid temporary directories unless user explicitly asks.",
+            project_path
+        ));
+    }
+
+    if let Some(forced_text) = try_force_xlsx_creation(&request.content, effective_project_path.as_deref()) {
+        let _ = window.emit("chat-event", ChatEvent::Text { content: forced_text.clone() });
+        let _ = window.emit("chat-event", ChatEvent::Done { final_text: forced_text.clone() });
+        let assistant_msg_id = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .add_message(&assistant_msg_id, &request.conversation_id, "assistant", &forced_text)?;
+        return Ok(forced_text);
+    }
 
     if let Some(forced_text) = try_force_directory_listing(&state.mcp_manager, &request.content).await {
         let _ = window.emit("chat-event", ChatEvent::Text { content: forced_text.clone() });
@@ -1260,7 +1290,8 @@ pub async fn run_task_agent(
     let effective_project_path = request
         .project_path
         .clone()
-        .or_else(|| task.as_ref().and_then(|t| t.project_path.clone()));
+        .or_else(|| task.as_ref().and_then(|t| t.project_path.clone()))
+        .or_else(default_workspace_root);
 
     // Check if API Key is needed (local services don't need it)
     if settings.api_key.is_empty() && !settings.allows_empty_api_key() {
@@ -1278,6 +1309,15 @@ pub async fn run_task_agent(
 
     // Update task status to running
     state.db.update_task_status(&request.task_id, "running")?;
+
+    if let Some(forced_text) = try_force_xlsx_creation(&request.message, effective_project_path.as_deref()) {
+        let assistant_msg_id = uuid::Uuid::new_v4().to_string();
+        let _ = state.db.add_task_message(&assistant_msg_id, &request.task_id, "assistant", &forced_text);
+        let _ = state.db.update_task_status(&request.task_id, "completed");
+        let _ = window.emit("agent-event", AgentEvent::Text { content: forced_text });
+        let _ = window.emit("agent-event", AgentEvent::Done { total_turns: 1 });
+        return Ok("Task completed successfully".to_string());
+    }
 
     if let Some(forced_text) = try_force_directory_listing(&state.mcp_manager, &request.message).await {
         let assistant_msg_id = uuid::Uuid::new_v4().to_string();
@@ -1655,6 +1695,55 @@ fn should_force_directory_listing_query(message: &str) -> bool {
         "available",
     ];
     intent_terms.iter().any(|t| normalized.contains(t))
+}
+
+fn should_force_xlsx_creation_query(message: &str) -> bool {
+    let normalized = message.to_lowercase();
+    let excel_terms = ["excel", "xlsx", "spreadsheet", "workbook"];
+    let action_terms = ["create", "make", "generate", "build"];
+    excel_terms.iter().any(|t| normalized.contains(t))
+        && action_terms.iter().any(|t| normalized.contains(t))
+}
+
+fn first_workspace_root(project_path: Option<&str>) -> Option<String> {
+    project_path
+        .unwrap_or("")
+        .split(',')
+        .map(|p| p.trim())
+        .find(|p| !p.is_empty())
+        .map(|p| p.to_string())
+}
+
+fn try_force_xlsx_creation(message: &str, project_path: Option<&str>) -> Option<String> {
+    if !should_force_xlsx_creation_query(message) {
+        return None;
+    }
+
+    let message_path_re = Regex::new(r#"([A-Za-z]:\\[^\s"'`]+\.xlsx|[^\s"'`]+\.xlsx)"#).ok()?;
+    let requested_path = message_path_re
+        .find(message)
+        .map(|m| m.as_str().to_string());
+
+    let target_path = if let Some(path) = requested_path {
+        path
+    } else {
+        let base = first_workspace_root(project_path).or_else(default_workspace_root)?;
+        std::path::Path::new(&base)
+            .join("data.xlsx")
+            .to_string_lossy()
+            .to_string()
+    };
+
+    let input = serde_json::json!({
+        "path": target_path,
+        "sheet_name": "Sheet1",
+        "rows": []
+    });
+
+    match crate::tools::xlsx_create::execute(&input, project_path) {
+        Ok(msg) => Some(format!("Created Excel file successfully.\n{}", msg)),
+        Err(err) => Some(format!("Failed to create Excel file: {}", err)),
+    }
 }
 
 async fn try_force_directory_listing(
