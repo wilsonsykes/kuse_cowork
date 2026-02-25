@@ -25,9 +25,9 @@ pub struct CommandError {
 }
 
 fn default_workspace_root() -> Option<String> {
-    std::env::current_dir()
+    crate::tools::path_utils::default_local_workspace_root()
         .ok()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| normalize_workspace_output_root(&p.to_string_lossy()))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -566,7 +566,8 @@ pub async fn run_agent(
     if let Some(turns) = request.max_turns {
         config.max_turns = turns;
     }
-    config.project_path = request.project_path.or_else(default_workspace_root);
+    config.project_path = normalize_project_path_csv(request.project_path)
+        .or_else(default_workspace_root);
 
     // Get provider info
     let provider_id = settings.get_provider();
@@ -723,7 +724,8 @@ pub async fn send_chat_with_tools(
     // Enhanced chat with tools - use AgentLoop which supports multiple providers
     use crate::llm_client::ProviderConfig;
 
-    let effective_project_path = request.project_path.clone().or_else(default_workspace_root);
+    let effective_project_path = normalize_project_path_csv(request.project_path.clone())
+        .or_else(default_workspace_root);
 
     let tool_executor = ToolExecutor::new(effective_project_path.clone())
         .with_mcp_manager(state.mcp_manager.clone());
@@ -1336,10 +1338,11 @@ pub async fn run_task_agent(
 ) -> Result<String, CommandError> {
     let settings = state.db.get_settings()?;
     let task = state.db.get_task(&request.task_id)?;
-    let effective_project_path = request
-        .project_path
-        .clone()
-        .or_else(|| task.as_ref().and_then(|t| t.project_path.clone()))
+    let effective_project_path = normalize_project_path_csv(request.project_path.clone())
+        .or_else(|| {
+            task.as_ref()
+                .and_then(|t| normalize_project_path_csv(t.project_path.clone()))
+        })
         .or_else(default_workspace_root);
 
     // Check if API Key is needed (local services don't need it)
@@ -1844,6 +1847,22 @@ fn normalize_workspace_output_root(base: &str) -> String {
         }
     }
     path.to_string_lossy().to_string()
+}
+
+fn normalize_project_path_csv(project_path: Option<String>) -> Option<String> {
+    let value = project_path?;
+    let roots: Vec<String> = value
+        .split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(normalize_workspace_output_root)
+        .collect();
+
+    if roots.is_empty() {
+        None
+    } else {
+        Some(roots.join(","))
+    }
 }
 
 fn safe_xlsx_target_path(

@@ -1,5 +1,27 @@
 use std::path::{Path, PathBuf};
 
+pub fn default_local_workspace_root() -> Result<PathBuf, String> {
+    // Preferred: writable "workspace" folder beside the running executable.
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidate = exe_dir.join("workspace");
+            if std::fs::create_dir_all(&candidate).is_ok() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    // Fallback: per-user app data workspace.
+    if let Some(data_dir) = dirs::data_dir() {
+        let candidate = data_dir.join("kuse-cowork").join("workspace");
+        std::fs::create_dir_all(&candidate)
+            .map_err(|e| format!("Failed to create fallback workspace directory: {}", e))?;
+        return Ok(candidate);
+    }
+
+    Err("Failed to determine a default local workspace directory".to_string())
+}
+
 pub fn parse_project_roots(project_path: Option<&str>) -> Vec<PathBuf> {
     project_path
         .unwrap_or("")
@@ -30,9 +52,7 @@ pub fn resolve_path(path: &Path, project_path: Option<&str>) -> Result<PathBuf, 
     if let Some(root) = roots.first() {
         Ok(root.join(path))
     } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|e| format!("Failed to get current directory: {}", e))
+        default_local_workspace_root().map(|root| root.join(path))
     }
 }
 
@@ -53,9 +73,7 @@ pub fn resolve_path_for_write(path: &Path, project_path: Option<&str>) -> Result
     if let Some(root) = roots.first() {
         Ok(root.join(path))
     } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|e| format!("Failed to get current directory: {}", e))
+        default_local_workspace_root().map(|root| root.join(path))
     }
 }
 
