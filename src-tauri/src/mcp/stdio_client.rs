@@ -9,6 +9,13 @@ struct StdioInner {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    mode: ProtocolMode,
+}
+
+#[derive(Clone, Copy)]
+pub enum ProtocolMode {
+    Framed,
+    LineDelimited,
 }
 
 pub struct StdioMcpClient {
@@ -58,6 +65,7 @@ impl StdioMcpClient {
                 child,
                 stdin,
                 stdout: BufReader::new(stdout),
+                mode: ProtocolMode::Framed,
             }),
             message_id: AtomicU64::new(1),
         })
@@ -76,31 +84,28 @@ impl StdioMcpClient {
         startup_timeout_ms: Option<u64>,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let timeout_ms = startup_timeout_ms.unwrap_or(20_000);
-        let init = timeout(Duration::from_millis(timeout_ms), async {
-            self.send_request(
-                "initialize",
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {
-                        "name": "kuse-cowork",
-                        "title": "Kuse Cowork Desktop",
-                        "version": "0.1.0"
-                    }
-                }),
-            )
-            .await
-        })
-        .await;
+        let params = json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "kuse-cowork",
+                "title": "Kuse Cowork Desktop",
+                "version": "0.1.0"
+            }
+        });
 
-        let response = match init {
+        let response = match timeout(
+            Duration::from_millis(timeout_ms),
+            self.send_request("initialize", params),
+        )
+        .await
+        {
             Ok(res) => res?,
             Err(_) => {
-                return Err(format!(
-                    "Timed out after {} ms waiting for stdio MCP initialize",
-                    timeout_ms
+                return Err(
+                    format!("Timed out after {} ms waiting for stdio MCP initialize", timeout_ms)
+                        .into(),
                 )
-                .into())
             }
         };
 
@@ -145,7 +150,8 @@ impl StdioMcpClient {
             "params": params,
         });
         let mut inner = self.inner.lock().await;
-        write_framed_json(&mut inner.stdin, &msg).await?;
+        let mode = inner.mode;
+        write_json_with_mode(&mut inner.stdin, &msg, mode).await?;
         Ok(())
     }
 
@@ -163,7 +169,8 @@ impl StdioMcpClient {
         });
 
         let mut inner = self.inner.lock().await;
-        write_framed_json(&mut inner.stdin, &req).await?;
+        let mode = inner.mode;
+        write_json_with_mode(&mut inner.stdin, &req, mode).await?;
 
         loop {
             let message = read_framed_json(&mut inner.stdout).await?;
@@ -176,61 +183,91 @@ impl StdioMcpClient {
             }
         }
     }
+
+    pub async fn set_mode(&self, mode: ProtocolMode) {
+        let mut inner = self.inner.lock().await;
+        inner.mode = mode;
+    }
 }
 
-async fn write_framed_json(
+async fn write_json_with_mode(
     stdin: &mut ChildStdin,
     value: &Value,
+    mode: ProtocolMode,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let payload = serde_json::to_vec(value)?;
-    let header = format!("Content-Length: {}\r\n\r\n", payload.len());
-    stdin.write_all(header.as_bytes()).await?;
-    stdin.write_all(&payload).await?;
-    stdin.flush().await?;
+    match mode {
+        ProtocolMode::Framed => {
+            let payload = serde_json::to_vec(value)?;
+            let header = format!("Content-Length: {}\r\n\r\n", payload.len());
+            stdin.write_all(header.as_bytes()).await?;
+            stdin.write_all(&payload).await?;
+            stdin.flush().await?;
+        }
+        ProtocolMode::LineDelimited => {
+            let line = serde_json::to_string(value)? + "\n";
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.flush().await?;
+        }
+    }
     Ok(())
 }
 
 async fn read_framed_json(
     stdout: &mut BufReader<ChildStdout>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let mut content_length: Option<usize> = None;
-    let mut first_line = String::new();
-    let n = stdout.read_line(&mut first_line).await?;
-    if n == 0 {
-        return Err("MCP stdio stream closed".into());
-    }
-
-    if first_line.trim_start().starts_with('{') {
-        return Ok(serde_json::from_str(first_line.trim())?);
-    }
-
-    if let Some((k, v)) = first_line.split_once(':') {
-        if k.eq_ignore_ascii_case("Content-Length") {
-            content_length = Some(v.trim().parse::<usize>()?);
-        }
-    }
-
+    // Some launchers (for example npx) can emit log lines on stdout before
+    // the MCP protocol starts. Skip any non-protocol lines until we detect
+    // either a raw JSON message or a Content-Length framed message.
     loop {
         let mut line = String::new();
         let n = stdout.read_line(&mut line).await?;
         if n == 0 {
-            return Err("MCP stdio stream closed while reading headers".into());
+            return Err("MCP stdio stream closed".into());
         }
+
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            break;
+            continue;
         }
-        if let Some((k, v)) = line.split_once(':') {
-            if k.eq_ignore_ascii_case("Content-Length") {
-                content_length = Some(v.trim().parse::<usize>()?);
+
+        if trimmed.starts_with('{') {
+            return Ok(serde_json::from_str(trimmed)?);
+        }
+
+        let Some((k, v)) = line.split_once(':') else {
+            // Non-header log line; ignore and keep scanning.
+            continue;
+        };
+
+        if !k.eq_ignore_ascii_case("Content-Length") {
+            // Not a protocol header line; ignore.
+            continue;
+        }
+
+        let mut content_length: usize = v.trim().parse()?;
+
+        // Read remaining headers until blank line.
+        loop {
+            let mut header = String::new();
+            let n = stdout.read_line(&mut header).await?;
+            if n == 0 {
+                return Err("MCP stdio stream closed while reading headers".into());
+            }
+
+            let h = header.trim();
+            if h.is_empty() {
+                break;
+            }
+
+            if let Some((hk, hv)) = header.split_once(':') {
+                if hk.eq_ignore_ascii_case("Content-Length") {
+                    content_length = hv.trim().parse()?;
+                }
             }
         }
-    }
 
-    let Some(len) = content_length else {
-        return Err("Missing Content-Length in stdio MCP response".into());
-    };
-    let mut buf = vec![0_u8; len];
-    stdout.read_exact(&mut buf).await?;
-    Ok(serde_json::from_slice(&buf)?)
+        let mut buf = vec![0_u8; content_length];
+        stdout.read_exact(&mut buf).await?;
+        return Ok(serde_json::from_slice(&buf)?);
+    }
 }

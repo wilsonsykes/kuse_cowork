@@ -1,5 +1,5 @@
 use super::http_client::HttpMcpClient;
-use super::stdio_client::StdioMcpClient;
+use super::stdio_client::{ProtocolMode, StdioMcpClient};
 use super::types::*;
 use std::collections::HashMap;
 use std::path::Path;
@@ -171,16 +171,46 @@ impl MCPManager {
             }
         }
 
-        let stdio_client = StdioMcpClient::new(
-            command,
-            &config.launch_args,
-            &config.launch_env,
-            config.working_dir.as_deref(),
-        )
-        .await?;
+        let mut last_error: Option<String> = None;
+        let mut selected_client: Option<StdioMcpClient> = None;
+        let mut pid: Option<u32> = None;
 
-        let pid = stdio_client.pid();
-        stdio_client.initialize(config.startup_timeout_ms).await?;
+        for mode in [ProtocolMode::Framed, ProtocolMode::LineDelimited] {
+            let client = StdioMcpClient::new(
+                command,
+                &config.launch_args,
+                &config.launch_env,
+                config.working_dir.as_deref(),
+            )
+            .await?;
+
+            client.set_mode(mode).await;
+
+            match client.initialize(config.startup_timeout_ms).await {
+                Ok(_) => {
+                    pid = client.pid();
+                    selected_client = Some(client);
+                    break;
+                }
+                Err(e) => {
+                    last_error = Some(e.to_string());
+                    client.shutdown().await;
+                }
+            }
+        }
+
+        let stdio_client = match selected_client {
+            Some(client) => client,
+            None => {
+                return Err(format!(
+                    "Failed stdio initialize in framed and line-delimited modes{}",
+                    last_error
+                        .map(|e| format!(" (last error: {})", e))
+                        .unwrap_or_default()
+                )
+                .into())
+            }
+        };
 
         let transport_client = MCPTransportClient::Stdio(stdio_client);
         let tools = self.discover_tools(&transport_client, &config.id).await?;

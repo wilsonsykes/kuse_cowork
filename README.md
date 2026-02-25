@@ -271,3 +271,22 @@ Inspired by:
 
 
 
+
+## Wilson Branding & Customization Upgrades
+
+This fork includes focused UX and MCP improvements customized by Wilson:
+
+- Branding updates in sidebar UI:
+  - `Kuse Cowork`
+  - `by Wilson`
+  - dynamic version tag beside branding
+- MCP enhancements:
+  - managed local MCP server launch controls in UI
+  - transport selector (`http` and `stdio`)
+  - richer MCP status card (process PID, endpoint, last error, discovered tools)
+  - improved `stdio` initialization behavior for Windows launcher edge cases
+- Desktop packaging/deployment support:
+  - validated Windows bundle outputs (`nsis`/`msi`)
+  - deployment guide added in `DEPLOY_WINDOWS.md`
+
+These updates are intended to improve daily local-development reliability and make MCP server onboarding easier for non-expert users.
