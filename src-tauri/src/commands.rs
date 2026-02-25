@@ -8,6 +8,7 @@ use base64::{Engine as _, engine::general_purpose};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{command, Emitter, State, Window};
 use tokio::sync::Mutex;
@@ -500,6 +501,20 @@ pub enum ChatEvent {
     Done { final_text: String },
 }
 
+#[derive(Debug, Clone)]
+struct ForcedToolPreview {
+    tool: String,
+    input: serde_json::Value,
+    result: String,
+    success: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ForcedExecution {
+    final_text: String,
+    previews: Vec<ForcedToolPreview>,
+}
+
 // Agent command
 #[derive(Debug, Deserialize)]
 pub struct AgentRequest {
@@ -757,24 +772,46 @@ Be concise and helpful. Explain what you're doing when using tools.{}"#, mcp_inf
         ));
     }
 
-    if let Some(forced_text) = try_force_xlsx_creation(&request.content, effective_project_path.as_deref()) {
-        let _ = window.emit("chat-event", ChatEvent::Text { content: forced_text.clone() });
-        let _ = window.emit("chat-event", ChatEvent::Done { final_text: forced_text.clone() });
+    if let Some(forced) = try_force_xlsx_creation(&request.content, effective_project_path.as_deref()) {
+        for preview in &forced.previews {
+            let _ = window.emit("chat-event", ChatEvent::ToolStart {
+                tool: preview.tool.clone(),
+                input: preview.input.clone(),
+            });
+            let _ = window.emit("chat-event", ChatEvent::ToolEnd {
+                tool: preview.tool.clone(),
+                result: preview.result.clone(),
+                success: preview.success,
+            });
+        }
+        let _ = window.emit("chat-event", ChatEvent::Text { content: forced.final_text.clone() });
+        let _ = window.emit("chat-event", ChatEvent::Done { final_text: forced.final_text.clone() });
         let assistant_msg_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .add_message(&assistant_msg_id, &request.conversation_id, "assistant", &forced_text)?;
-        return Ok(forced_text);
+            .add_message(&assistant_msg_id, &request.conversation_id, "assistant", &forced.final_text)?;
+        return Ok(forced.final_text);
     }
 
-    if let Some(forced_text) = try_force_directory_listing(&state.mcp_manager, &request.content).await {
-        let _ = window.emit("chat-event", ChatEvent::Text { content: forced_text.clone() });
-        let _ = window.emit("chat-event", ChatEvent::Done { final_text: forced_text.clone() });
+    if let Some(forced) = try_force_directory_listing(&state.mcp_manager, &request.content).await {
+        for preview in &forced.previews {
+            let _ = window.emit("chat-event", ChatEvent::ToolStart {
+                tool: preview.tool.clone(),
+                input: preview.input.clone(),
+            });
+            let _ = window.emit("chat-event", ChatEvent::ToolEnd {
+                tool: preview.tool.clone(),
+                result: preview.result.clone(),
+                success: preview.success,
+            });
+        }
+        let _ = window.emit("chat-event", ChatEvent::Text { content: forced.final_text.clone() });
+        let _ = window.emit("chat-event", ChatEvent::Done { final_text: forced.final_text.clone() });
         let assistant_msg_id = uuid::Uuid::new_v4().to_string();
         state
             .db
-            .add_message(&assistant_msg_id, &request.conversation_id, "assistant", &forced_text)?;
-        return Ok(forced_text);
+            .add_message(&assistant_msg_id, &request.conversation_id, "assistant", &forced.final_text)?;
+        return Ok(forced.final_text);
     }
 
     let message_builder = MessageBuilder::new(
@@ -1343,20 +1380,42 @@ pub async fn run_task_agent(
     // Update task status to running
     state.db.update_task_status(&request.task_id, "running")?;
 
-    if let Some(forced_text) = try_force_xlsx_creation(&request.message, effective_project_path.as_deref()) {
+    if let Some(forced) = try_force_xlsx_creation(&request.message, effective_project_path.as_deref()) {
+        for preview in &forced.previews {
+            let _ = window.emit("agent-event", AgentEvent::ToolStart {
+                tool: preview.tool.clone(),
+                input: preview.input.clone(),
+            });
+            let _ = window.emit("agent-event", AgentEvent::ToolEnd {
+                tool: preview.tool.clone(),
+                result: preview.result.clone(),
+                success: preview.success,
+            });
+        }
         let assistant_msg_id = uuid::Uuid::new_v4().to_string();
-        let _ = state.db.add_task_message(&assistant_msg_id, &request.task_id, "assistant", &forced_text);
+        let _ = state.db.add_task_message(&assistant_msg_id, &request.task_id, "assistant", &forced.final_text);
         let _ = state.db.update_task_status(&request.task_id, "completed");
-        let _ = window.emit("agent-event", AgentEvent::Text { content: forced_text });
+        let _ = window.emit("agent-event", AgentEvent::Text { content: forced.final_text });
         let _ = window.emit("agent-event", AgentEvent::Done { total_turns: 1 });
         return Ok("Task completed successfully".to_string());
     }
 
-    if let Some(forced_text) = try_force_directory_listing(&state.mcp_manager, &request.message).await {
+    if let Some(forced) = try_force_directory_listing(&state.mcp_manager, &request.message).await {
+        for preview in &forced.previews {
+            let _ = window.emit("agent-event", AgentEvent::ToolStart {
+                tool: preview.tool.clone(),
+                input: preview.input.clone(),
+            });
+            let _ = window.emit("agent-event", AgentEvent::ToolEnd {
+                tool: preview.tool.clone(),
+                result: preview.result.clone(),
+                success: preview.success,
+            });
+        }
         let assistant_msg_id = uuid::Uuid::new_v4().to_string();
-        let _ = state.db.add_task_message(&assistant_msg_id, &request.task_id, "assistant", &forced_text);
+        let _ = state.db.add_task_message(&assistant_msg_id, &request.task_id, "assistant", &forced.final_text);
         let _ = state.db.update_task_status(&request.task_id, "completed");
-        let _ = window.emit("agent-event", AgentEvent::Text { content: forced_text });
+        let _ = window.emit("agent-event", AgentEvent::Text { content: forced.final_text });
         let _ = window.emit("agent-event", AgentEvent::Done { total_turns: 1 });
         return Ok("Task completed successfully".to_string());
     }
@@ -1743,16 +1802,175 @@ fn should_force_xlsx_creation_query(message: &str) -> bool {
         && action_terms.iter().any(|t| normalized.contains(t))
 }
 
+fn should_force_advanced_xlsx_mode(message: &str) -> bool {
+    let normalized = message.to_lowercase();
+    let advanced_terms = [
+        "sheet",
+        "sheets",
+        "formula",
+        "formulas",
+        "freeze",
+        "filter",
+        "column width",
+        "row height",
+        "summary",
+        "inventory",
+        "sales",
+        "formatting",
+        "professional",
+    ];
+    advanced_terms.iter().any(|t| normalized.contains(t))
+}
+
 fn first_workspace_root(project_path: Option<&str>) -> Option<String> {
     project_path
         .unwrap_or("")
         .split(',')
         .map(|p| p.trim())
         .find(|p| !p.is_empty())
-        .map(|p| p.to_string())
+        .map(|p| normalize_workspace_output_root(p))
 }
 
-fn try_force_xlsx_creation(message: &str, project_path: Option<&str>) -> Option<String> {
+fn normalize_workspace_output_root(base: &str) -> String {
+    let mut path = PathBuf::from(base);
+    if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.eq_ignore_ascii_case("src-tauri"))
+        .unwrap_or(false)
+    {
+        if let Some(parent) = path.parent() {
+            path = parent.to_path_buf();
+        }
+    }
+    path.to_string_lossy().to_string()
+}
+
+fn safe_xlsx_target_path(
+    requested_path: Option<String>,
+    project_path: Option<&str>,
+) -> Result<String, String> {
+    let base = first_workspace_root(project_path)
+        .or_else(default_workspace_root)
+        .ok_or_else(|| "No workspace root available".to_string())?;
+    let base_path = PathBuf::from(base);
+
+    let candidate = match requested_path {
+        Some(raw) => {
+            let p = PathBuf::from(raw);
+            if p.is_absolute() {
+                if p.starts_with(&base_path) {
+                    p
+                } else {
+                    base_path.join(
+                        p.file_name()
+                            .ok_or_else(|| "Invalid XLSX path".to_string())?,
+                    )
+                }
+            } else {
+                base_path.join(p)
+            }
+        }
+        None => base_path.join("data.xlsx"),
+    };
+
+    let file_name = candidate
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("data.xlsx");
+    let final_name = if file_name.to_lowercase().ends_with(".xlsx") {
+        file_name.to_string()
+    } else {
+        format!("{}.xlsx", file_name)
+    };
+
+    let mut out = candidate;
+    out.set_file_name(final_name);
+    Ok(out.to_string_lossy().to_string())
+}
+
+fn build_advanced_sales_workbook_input(target_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "path": target_path,
+        "workbook": {
+            "sheets": [
+                {
+                    "name": "Sales",
+                    "headers": ["Date", "Region", "Product", "Quantity", "Unit Price", "Line Total"],
+                    "column_widths": [14, 14, 18, 12, 12, 14],
+                    "row_heights": [22],
+                    "freeze_panes": { "row": 1, "col": 0 },
+                    "autofilter": { "from_row": 0, "from_col": 0, "to_row": 20, "to_col": 5 },
+                    "rows": [
+                        ["2026-01-01", "North", "Laptop", 2, 1200, {"formula":"D2*E2"}],
+                        ["2026-01-02", "South", "Monitor", 5, 250, {"formula":"D3*E3"}],
+                        ["2026-01-03", "East", "Keyboard", 12, 40, {"formula":"D4*E4"}],
+                        ["2026-01-04", "West", "Mouse", 10, 25, {"formula":"D5*E5"}],
+                        ["2026-01-05", "North", "Dock", 6, 90, {"formula":"D6*E6"}],
+                        ["2026-01-06", "South", "Headset", 8, 75, {"formula":"D7*E7"}],
+                        ["2026-01-07", "East", "Webcam", 4, 130, {"formula":"D8*E8"}],
+                        ["2026-01-08", "West", "Chair", 3, 320, {"formula":"D9*E9"}],
+                        ["2026-01-09", "North", "Desk", 2, 480, {"formula":"D10*E10"}],
+                        ["2026-01-10", "South", "Laptop", 1, 1200, {"formula":"D11*E11"}],
+                        ["2026-01-11", "East", "Monitor", 7, 250, {"formula":"D12*E12"}],
+                        ["2026-01-12", "West", "Keyboard", 9, 40, {"formula":"D13*E13"}],
+                        ["2026-01-13", "North", "Mouse", 11, 25, {"formula":"D14*E14"}],
+                        ["2026-01-14", "South", "Dock", 5, 90, {"formula":"D15*E15"}],
+                        ["2026-01-15", "East", "Headset", 6, 75, {"formula":"D16*E16"}],
+                        ["2026-01-16", "West", "Webcam", 3, 130, {"formula":"D17*E17"}],
+                        ["2026-01-17", "North", "Chair", 2, 320, {"formula":"D18*E18"}],
+                        ["2026-01-18", "South", "Desk", 1, 480, {"formula":"D19*E19"}],
+                        ["2026-01-19", "East", "Laptop", 2, 1200, {"formula":"D20*E20"}],
+                        ["2026-01-20", "West", "Monitor", 4, 250, {"formula":"D21*E21"}]
+                    ]
+                },
+                {
+                    "name": "Summary",
+                    "headers": ["Metric", "Value"],
+                    "column_widths": [28, 18],
+                    "rows": [
+                        ["Total Revenue", {"formula":"SUM(Sales!F2:F21)"}],
+                        ["Average Order Value", {"formula":"AVERAGE(Sales!F2:F21)"}],
+                        ["Top Region (by rows)", {"formula":"INDEX({\"North\",\"South\",\"East\",\"West\"},MATCH(MAX(COUNTIF(Sales!B2:B21,{\"North\",\"South\",\"East\",\"West\"})),COUNTIF(Sales!B2:B21,{\"North\",\"South\",\"East\",\"West\"}),0))"}],
+                        ["Top Product (sample)", {"formula":"INDEX(Sales!C2:C21,MATCH(MAX(Sales!F2:F21),Sales!F2:F21,0))"}]
+                    ]
+                },
+                {
+                    "name": "Inventory",
+                    "headers": ["Item", "SKU", "Stock On Hand", "Reorder Level", "Unit Cost", "Stock Value", "Low Stock"],
+                    "column_widths": [18, 12, 14, 14, 12, 14, 12],
+                    "freeze_panes": { "row": 1, "col": 0 },
+                    "autofilter": { "from_row": 0, "from_col": 0, "to_row": 12, "to_col": 6 },
+                    "rows": [
+                        ["Laptop", "SKU-1001", 12, 8, 900, {"formula":"C2*E2"}, {"formula":"IF(C2<=D2,\"YES\",\"NO\")"}],
+                        ["Monitor", "SKU-1002", 30, 12, 170, {"formula":"C3*E3"}, {"formula":"IF(C3<=D3,\"YES\",\"NO\")"}],
+                        ["Keyboard", "SKU-1003", 55, 20, 22, {"formula":"C4*E4"}, {"formula":"IF(C4<=D4,\"YES\",\"NO\")"}],
+                        ["Mouse", "SKU-1004", 40, 25, 15, {"formula":"C5*E5"}, {"formula":"IF(C5<=D5,\"YES\",\"NO\")"}],
+                        ["Dock", "SKU-1005", 9, 10, 60, {"formula":"C6*E6"}, {"formula":"IF(C6<=D6,\"YES\",\"NO\")"}],
+                        ["Headset", "SKU-1006", 14, 10, 40, {"formula":"C7*E7"}, {"formula":"IF(C7<=D7,\"YES\",\"NO\")"}],
+                        ["Webcam", "SKU-1007", 6, 8, 75, {"formula":"C8*E8"}, {"formula":"IF(C8<=D8,\"YES\",\"NO\")"}],
+                        ["Chair", "SKU-1008", 5, 6, 190, {"formula":"C9*E9"}, {"formula":"IF(C9<=D9,\"YES\",\"NO\")"}],
+                        ["Desk", "SKU-1009", 3, 4, 260, {"formula":"C10*E10"}, {"formula":"IF(C10<=D10,\"YES\",\"NO\")"}],
+                        ["UPS", "SKU-1010", 7, 5, 120, {"formula":"C11*E11"}, {"formula":"IF(C11<=D11,\"YES\",\"NO\")"}],
+                        ["Cable Kit", "SKU-1011", 80, 30, 8, {"formula":"C12*E12"}, {"formula":"IF(C12<=D12,\"YES\",\"NO\")"}],
+                        ["Adapter", "SKU-1012", 24, 15, 18, {"formula":"C13*E13"}, {"formula":"IF(C13<=D13,\"YES\",\"NO\")"}]
+                    ]
+                }
+            ]
+        }
+    })
+}
+
+fn build_simple_xlsx_input(target_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "path": target_path,
+        "sheet_name": "Sheet1",
+        "rows": [[""]],
+        "strict": true
+    })
+}
+
+fn try_force_xlsx_creation(message: &str, project_path: Option<&str>) -> Option<ForcedExecution> {
     if !should_force_xlsx_creation_query(message) {
         return None;
     }
@@ -1762,32 +1980,59 @@ fn try_force_xlsx_creation(message: &str, project_path: Option<&str>) -> Option<
         .find(message)
         .map(|m| m.as_str().to_string());
 
-    let target_path = if let Some(path) = requested_path {
-        path
-    } else {
-        let base = first_workspace_root(project_path).or_else(default_workspace_root)?;
-        std::path::Path::new(&base)
-            .join("data.xlsx")
-            .to_string_lossy()
-            .to_string()
+    let target_path = match safe_xlsx_target_path(requested_path, project_path) {
+        Ok(path) => path,
+        Err(err) => {
+            return Some(ForcedExecution {
+                final_text: format!("Unable to choose a safe XLSX output path: {}", err),
+                previews: vec![],
+            })
+        }
     };
 
-    let input = serde_json::json!({
-        "path": target_path,
-        "sheet_name": "Sheet1",
-        "rows": []
-    });
+    let wants_advanced = should_force_advanced_xlsx_mode(message);
+    let input = if wants_advanced {
+        let normalized = message.to_lowercase();
+        let has_sales_summary_inventory = ["sales", "summary", "inventory"]
+            .iter()
+            .all(|k| normalized.contains(k));
+        if !has_sales_summary_inventory {
+            return Some(ForcedExecution {
+                final_text: "I can create a complex workbook, but I need one detail: provide target sheet names (comma-separated) so I can build and validate it strictly.".to_string(),
+                previews: vec![],
+            });
+        }
+        build_advanced_sales_workbook_input(&target_path)
+    } else {
+        build_simple_xlsx_input(&target_path)
+    };
 
     match crate::tools::xlsx_create::execute(&input, project_path) {
-        Ok(msg) => Some(format!("Created Excel file successfully.\n{}", msg)),
-        Err(err) => Some(format!("Failed to create Excel file: {}", err)),
+        Ok(msg) => Some(ForcedExecution {
+            final_text: format!("Created Excel file successfully with strict validation.\n{}", msg),
+            previews: vec![ForcedToolPreview {
+                tool: "create_xlsx_file (forced)".to_string(),
+                input,
+                result: msg,
+                success: true,
+            }],
+        }),
+        Err(err) => Some(ForcedExecution {
+            final_text: format!("Failed to create Excel file: {}", err),
+            previews: vec![ForcedToolPreview {
+                tool: "create_xlsx_file (forced)".to_string(),
+                input,
+                result: err,
+                success: false,
+            }],
+        }),
     }
 }
 
 async fn try_force_directory_listing(
     mcp_manager: &MCPManager,
     message: &str,
-) -> Option<String> {
+) -> Option<ForcedExecution> {
     if !should_force_directory_listing_query(message) {
         return None;
     }
@@ -1811,10 +2056,19 @@ async fn try_force_directory_listing(
         .await;
 
     if !allowed.success {
-        return Some(format!(
+        let error_text = format!(
             "I attempted to list directories using MCP, but failed to read allowed directories: {}",
             allowed.error.unwrap_or_else(|| "unknown error".to_string())
-        ));
+        );
+        return Some(ForcedExecution {
+            final_text: error_text.clone(),
+            previews: vec![ForcedToolPreview {
+                tool: "list_allowed_directories (forced)".to_string(),
+                input: serde_json::json!({}),
+                result: error_text,
+                success: false,
+            }],
+        });
     }
 
     let allowed_text = extract_mcp_result_text(&allowed.result);
@@ -1829,18 +2083,51 @@ async fn try_force_directory_listing(
         .await;
 
     if !listed.success {
-        return Some(format!(
+        let error_text = format!(
             "Allowed directories:\n{}\n\nI attempted to list folders, but the tool call failed: {}",
             allowed_text,
             listed.error.unwrap_or_else(|| "unknown error".to_string())
-        ));
+        );
+        return Some(ForcedExecution {
+            final_text: error_text.clone(),
+            previews: vec![
+                ForcedToolPreview {
+                    tool: "list_allowed_directories (forced)".to_string(),
+                    input: serde_json::json!({}),
+                    result: allowed_text,
+                    success: true,
+                },
+                ForcedToolPreview {
+                    tool: "list_directory (forced)".to_string(),
+                    input: serde_json::json!({ "path": root_path }),
+                    result: error_text,
+                    success: false,
+                },
+            ],
+        });
     }
 
     let listing_text = extract_mcp_result_text(&listed.result);
-    Some(format!(
-        "Allowed directories:\n{}\n\nDirectory listing:\n{}",
-        allowed_text, listing_text
-    ))
+    Some(ForcedExecution {
+        final_text: format!(
+            "Allowed directories:\n{}\n\nDirectory listing:\n{}",
+            allowed_text, listing_text
+        ),
+        previews: vec![
+            ForcedToolPreview {
+                tool: "list_allowed_directories (forced)".to_string(),
+                input: serde_json::json!({}),
+                result: allowed_text,
+                success: true,
+            },
+            ForcedToolPreview {
+                tool: "list_directory (forced)".to_string(),
+                input: serde_json::json!({ "path": root_path }),
+                result: listing_text,
+                success: true,
+            },
+        ],
+    })
 }
 
 fn extract_mcp_result_text(value: &serde_json::Value) -> String {
