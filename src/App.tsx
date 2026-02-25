@@ -75,7 +75,13 @@ const App: Component = () => {
     setTasks(taskList);
   };
 
-  const handleNewTask = async (title: string, description: string, projectPath?: string) => {
+  const handleNewTask = async (
+    title: string,
+    description: string,
+    projectPath?: string,
+    imagePaths?: string[],
+    imageData?: Array<{ name?: string; media_type: string; data: string }>
+  ) => {
     const task = await createTask(title, description, projectPath);
     setActiveTask(task);
 
@@ -101,6 +107,8 @@ const App: Component = () => {
           task_id: task.id,
           message: description,
           project_path: projectPath,
+          image_paths: imagePaths,
+          image_data: imageData,
           max_turns: 50,
         },
         handleAgentEvent
@@ -224,7 +232,12 @@ const App: Component = () => {
   };
 
   // Continue conversation with existing task
-  const handleContinueTask = async (message: string, projectPath?: string) => {
+  const handleContinueTask = async (
+    message: string,
+    projectPath?: string,
+    imagePaths?: string[],
+    imageData?: Array<{ name?: string; media_type: string; data: string }>
+  ) => {
     const task = activeTask();
     if (!task) return;
 
@@ -248,6 +261,8 @@ const App: Component = () => {
           task_id: task.id,
           message,
           project_path: projectPath || task.project_path || undefined,
+          image_paths: imagePaths,
+          image_data: imageData,
           max_turns: 50,
         },
         handleAgentEvent

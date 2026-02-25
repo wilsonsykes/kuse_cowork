@@ -81,6 +81,12 @@ export interface TaskAgentRequest {
   task_id: string;
   message: string;
   project_path?: string;
+  image_paths?: string[];
+  image_data?: Array<{
+    name?: string;
+    media_type: string;
+    data: string; // base64 payload (without data URL prefix)
+  }>;
   max_turns?: number;
 }
 
@@ -523,6 +529,22 @@ export async function getSkillsList(): Promise<SkillMetadata[]> {
     return [];
   }
   return invoke<SkillMetadata[]>("get_skills_list");
+}
+
+export async function openImageFilesDialog(): Promise<string[]> {
+  if (!isTauri()) {
+    return [];
+  }
+  const selected = await open({
+    directory: false,
+    multiple: true,
+    title: "Select image files",
+    filters: [
+      { name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] },
+    ],
+  });
+  if (!selected) return [];
+  return Array.isArray(selected) ? selected : [selected];
 }
 
 export async function checkLocalServiceStatus(baseUrl: string): Promise<LocalServiceStatus> {

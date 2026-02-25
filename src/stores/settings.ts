@@ -284,6 +284,40 @@ export function usesResponsesApi(modelId: string): boolean {
   return lower.startsWith("gpt-5") || lower.match(/^gpt-5[\.-]/) !== null;
 }
 
+// Heuristic: whether current model likely supports image input.
+export function isLikelyVisionModel(modelId: string, baseUrl?: string): boolean {
+  const modelLower = modelId.toLowerCase();
+  const provider = getProviderFromModel(modelId, baseUrl);
+
+  // Common local vision model name patterns
+  const localVisionHints = [
+    "llava",
+    "vision",
+    "vl",
+    "minicpm-v",
+    "qwen-vl",
+  ];
+  if (provider === "ollama" || provider === "localai" || provider === "custom") {
+    return localVisionHints.some(h => modelLower.includes(h));
+  }
+
+  // Main cloud families with broad image support.
+  if (modelLower.includes("claude")) return true;
+  if (modelLower.includes("gemini")) return true;
+  if (modelLower.includes("gpt-4o")) return true;
+  if (modelLower.startsWith("gpt-5")) return true;
+
+  // OpenRouter often routes multimodal models by provider/model id.
+  if (provider === "openrouter") {
+    return modelLower.includes("claude")
+      || modelLower.includes("gpt-4o")
+      || modelLower.includes("gemini")
+      || modelLower.includes("vision");
+  }
+
+  return false;
+}
+
 // Convert between frontend and API formats
 function fromApiSettings(api: ApiSettings): Settings {
   const providerKeys = api.provider_keys || {};

@@ -71,6 +71,18 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         thought_signature: Option<String>,
     },
+    #[serde(rename = "image")]
+    Image {
+        source: ImageSource,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub media_type: String,
+    pub data: String,
 }
 
 /// Message in conversation

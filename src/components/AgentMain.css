@@ -206,6 +206,20 @@
   overflow: hidden;
 }
 
+.image-attachments .path-item {
+  max-width: 280px;
+}
+
+.image-warning {
+  margin-bottom: 0.75rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid #ffe58f;
+  background: #fffbe6;
+  color: #8a6d1f;
+  border-radius: var(--radius);
+  font-size: 0.8125rem;
+}
+
 .paths-header {
   display: flex;
   justify-content: space-between;

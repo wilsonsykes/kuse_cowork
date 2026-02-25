@@ -1,10 +1,13 @@
 use crate::agent::{AgentConfig, AgentContent, AgentEvent, AgentLoop, AgentMessage};
+use crate::agent::{ContentBlock, ImageSource};
 use crate::claude::{ClaudeClient, Message as ClaudeMessage};
 use crate::database::{Conversation, Database, Message, PlanStep, Settings, Task, TaskMessage};
 use crate::mcp::{MCPManager, MCPServerConfig, MCPServerStatus, MCPToolCall, MCPToolResult};
 use crate::skills::{SkillMetadata, get_available_skills};
+use base64::{Engine as _, engine::general_purpose};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::sync::Arc;
 use tauri::{command, Emitter, State, Window};
 use tokio::sync::Mutex;
@@ -1276,7 +1279,16 @@ pub struct TaskAgentRequest {
     pub task_id: String,
     pub message: String,
     pub project_path: Option<String>,
+    pub image_paths: Option<Vec<String>>,
+    pub image_data: Option<Vec<ImageAttachmentInput>>,
     pub max_turns: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ImageAttachmentInput {
+    pub name: Option<String>,
+    pub media_type: String,
+    pub data: String,
 }
 
 #[command]
@@ -1305,7 +1317,28 @@ pub async fn run_task_agent(
 
     // Save new user message
     let user_msg_id = uuid::Uuid::new_v4().to_string();
-    state.db.add_task_message(&user_msg_id, &request.task_id, "user", &request.message)?;
+    let mut attached_names: Vec<String> = request
+        .image_paths
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| std::path::Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()))
+        .collect();
+    if let Some(inline_images) = &request.image_data {
+        for (idx, img) in inline_images.iter().enumerate() {
+            attached_names.push(
+                img.name
+                    .clone()
+                    .unwrap_or_else(|| format!("pasted-image-{}", idx + 1)),
+            );
+        }
+    }
+    let user_text_for_db = if attached_names.is_empty() {
+        request.message.clone()
+    } else {
+        format!("{}\n\n[Attached images: {}]", request.message, attached_names.join(", "))
+    };
+    state.db.add_task_message(&user_msg_id, &request.task_id, "user", &user_text_for_db)?;
 
     // Update task status to running
     state.db.update_task_status(&request.task_id, "running")?;
@@ -1388,7 +1421,12 @@ pub async fn run_task_agent(
     // Add the new user message
     agent_messages.push(AgentMessage {
         role: "user".to_string(),
-        content: AgentContent::Text(request.message.clone()),
+        content: build_user_content_with_images(
+            &request.message,
+            request.image_paths.as_deref().unwrap_or(&[]),
+            request.image_data.as_deref().unwrap_or(&[]),
+            effective_project_path.as_deref(),
+        ),
     });
 
     // Create channel for events
@@ -1834,6 +1872,89 @@ fn extract_first_windows_path(input: &str) -> Option<String> {
     re.find(input).map(|m| m.as_str().trim().to_string())
 }
 
+fn build_user_content_with_images(
+    message: &str,
+    image_paths: &[String],
+    image_data: &[ImageAttachmentInput],
+    project_path: Option<&str>,
+) -> AgentContent {
+    if image_paths.is_empty() && image_data.is_empty() {
+        return AgentContent::Text(message.to_string());
+    }
+
+    let mut blocks = vec![ContentBlock::Text {
+        text: message.to_string(),
+    }];
+
+    for image_path in image_paths {
+        let resolved = match crate::tools::path_utils::resolve_path_for_write(
+            std::path::Path::new(image_path),
+            project_path,
+        ) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let ext = resolved
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let media_type = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            _ => continue,
+        };
+
+        let bytes = match fs::read(&resolved) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        // Keep request sizes manageable and avoid provider rejections.
+        if bytes.len() > 10 * 1024 * 1024 {
+            continue;
+        }
+
+        let encoded = general_purpose::STANDARD.encode(bytes);
+        blocks.push(ContentBlock::Image {
+            source: ImageSource {
+                source_type: "base64".to_string(),
+                media_type: media_type.to_string(),
+                data: encoded,
+            },
+        });
+    }
+
+    for inline in image_data {
+        let media = inline.media_type.to_lowercase();
+        let allowed = [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif",
+        ];
+        if !allowed.contains(&media.as_str()) {
+            continue;
+        }
+        if inline.data.len() > 14 * 1024 * 1024 {
+            continue;
+        }
+        blocks.push(ContentBlock::Image {
+            source: ImageSource {
+                source_type: "base64".to_string(),
+                media_type: media,
+                data: inline.data.clone(),
+            },
+        });
+    }
+
+    AgentContent::Blocks(blocks)
+}
+
 /// Convert Claude API request format to OpenAI format
 fn convert_to_openai_format(
     request: &crate::agent::message_builder::ClaudeApiRequest,
@@ -1867,6 +1988,8 @@ fn convert_to_openai_format(
                 // Handle content blocks (text, tool_use, tool_result)
                 let mut text_parts: Vec<String> = Vec::new();
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+                let mut content_parts: Vec<serde_json::Value> = Vec::new();
+                let mut has_image = false;
 
                 for block in blocks {
                     let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -1875,6 +1998,30 @@ fn convert_to_openai_format(
                         "text" => {
                             if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                 text_parts.push(text.to_string());
+                                content_parts.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                }));
+                            }
+                        }
+                        "image" => {
+                            let media = block
+                                .get("source")
+                                .and_then(|v| v.get("media_type"))
+                                .and_then(|v| v.as_str());
+                            let data = block
+                                .get("source")
+                                .and_then(|v| v.get("data"))
+                                .and_then(|v| v.as_str());
+
+                            if let (Some(media_type), Some(base64_data)) = (media, data) {
+                                has_image = true;
+                                content_parts.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": format!("data:{};base64,{}", media_type, base64_data)
+                                    }
+                                }));
                             }
                         }
                         "tool_use" => {
@@ -1903,7 +2050,11 @@ fn convert_to_openai_format(
                 if !text_parts.is_empty() {
                     let mut msg_obj = serde_json::json!({
                         "role": role,
-                        "content": text_parts.join("\n")
+                        "content": if has_image {
+                            serde_json::Value::Array(content_parts.clone())
+                        } else {
+                            serde_json::Value::String(text_parts.join("\n"))
+                        }
                     });
 
                     // If there are tool_calls
@@ -1912,6 +2063,11 @@ fn convert_to_openai_format(
                     }
 
                     messages.push(msg_obj);
+                } else if !content_parts.is_empty() {
+                    messages.push(serde_json::json!({
+                        "role": role,
+                        "content": content_parts
+                    }));
                 } else if !tool_calls.is_empty() {
                     // Only tool_calls, no text
                     messages.push(serde_json::json!({
@@ -2002,6 +2158,24 @@ fn convert_to_google_format(
                         "text" => {
                             if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                 parts_list.push(serde_json::json!({"text": text}));
+                            }
+                        }
+                        "image" => {
+                            let media = block
+                                .get("source")
+                                .and_then(|v| v.get("media_type"))
+                                .and_then(|v| v.as_str());
+                            let data = block
+                                .get("source")
+                                .and_then(|v| v.get("data"))
+                                .and_then(|v| v.as_str());
+                            if let (Some(media_type), Some(base64_data)) = (media, data) {
+                                parts_list.push(serde_json::json!({
+                                    "inlineData": {
+                                        "mimeType": media_type,
+                                        "data": base64_data
+                                    }
+                                }));
                             }
                         }
                         "tool_use" => {
