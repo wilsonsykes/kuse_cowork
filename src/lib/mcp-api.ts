@@ -56,6 +56,10 @@ export async function saveMCPServer(config: MCPServerConfig): Promise<void> {
   return invoke("save_mcp_server", { config });
 }
 
+export async function testMCPServerConfig(config: MCPServerConfig): Promise<MCPServerStatus> {
+  return invoke("test_mcp_server_config", { config });
+}
+
 export async function deleteMCPServer(id: string): Promise<void> {
   return invoke("delete_mcp_server", { id });
 }

@@ -111,13 +111,33 @@
   font-family: monospace;
 }
 
+.preset-row {
+  display: flex;
+  gap: 10px;
+}
+
+.template-btn {
+  padding: 10px 14px;
+  border: none;
+  border-radius: 6px;
+  background: #0d6efd;
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.template-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .form-actions {
   display: flex;
   gap: 10px;
   margin-top: 20px;
 }
 
-.save-btn, .cancel-btn {
+.save-btn, .cancel-btn, .test-btn {
   padding: 10px 20px;
   border: none;
   border-radius: 6px;
@@ -141,6 +161,39 @@
 
 .cancel-btn:hover {
   background: #545b62;
+}
+
+.test-btn {
+  background: #17a2b8;
+  color: white;
+}
+
+.test-btn:hover:not(:disabled) {
+  background: #138496;
+}
+
+.test-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.test-feedback {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.test-feedback.ok {
+  background: #d4edda;
+  color: #155724;
+  border: 1px solid #c3e6cb;
+}
+
+.test-feedback.error {
+  background: #f8d7da;
+  color: #721c24;
+  border: 1px solid #f5c6cb;
 }
 
 /* Radio Group */

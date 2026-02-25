@@ -87,6 +87,7 @@ impl ToolExecutor {
             "glob" => tools::glob::execute(&tool_use.input, project_path),
             "grep" => tools::grep::execute(&tool_use.input, project_path),
             "list_dir" => tools::list_dir::execute(&tool_use.input, project_path),
+            "create_xlsx_file" => tools::xlsx_create::execute(&tool_use.input, project_path),
             _ => Err(format!("Unknown tool: {}", tool_use.name)),
         };
 

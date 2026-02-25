@@ -111,6 +111,7 @@ impl Default for AgentConfig {
                 "glob".to_string(),
                 "grep".to_string(),
                 "list_dir".to_string(),
+                "create_xlsx_file".to_string(),
                 "docker_run".to_string(),
                 "docker_list".to_string(),
                 "docker_images".to_string(),
@@ -153,6 +154,7 @@ After outputting the plan, immediately begin executing each step. As you work th
 - `glob` - Find files by pattern
 - `grep` - Search file contents
 - `list_dir` - List directory contents
+- `create_xlsx_file` - Create valid .xlsx files from structured rows
 - `docker_run` - Run commands in Docker containers
 - `docker_list` - List running containers
 - `docker_images` - List available images

@@ -61,6 +61,7 @@ pub fn run() {
             commands::get_skills_list,
             commands::list_mcp_servers,
             commands::save_mcp_server,
+            commands::test_mcp_server_config,
             commands::delete_mcp_server,
             commands::connect_mcp_server,
             commands::disconnect_mcp_server,

@@ -7,6 +7,7 @@ pub mod glob;
 pub mod grep;
 pub mod list_dir;
 pub mod path_utils;
+pub mod xlsx_create;
 
 use crate::agent::ToolDefinition;
 
@@ -20,6 +21,7 @@ pub fn get_all_tools() -> Vec<ToolDefinition> {
         glob::definition(),
         grep::definition(),
         list_dir::definition(),
+        xlsx_create::definition(),
     ];
 
     // Add Docker tools

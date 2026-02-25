@@ -3,6 +3,7 @@ use crate::claude::{ClaudeClient, Message as ClaudeMessage};
 use crate::database::{Conversation, Database, Message, PlanStep, Settings, Task, TaskMessage};
 use crate::mcp::{MCPManager, MCPServerConfig, MCPServerStatus, MCPToolCall, MCPToolResult};
 use crate::skills::{SkillMetadata, get_available_skills};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{command, Emitter, State, Window};
@@ -733,6 +734,16 @@ For simple questions or conversations, respond directly without using tools.
 
 Be concise and helpful. Explain what you're doing when using tools.{}"#, mcp_info);
 
+    if let Some(forced_text) = try_force_directory_listing(&state.mcp_manager, &request.content).await {
+        let _ = window.emit("chat-event", ChatEvent::Text { content: forced_text.clone() });
+        let _ = window.emit("chat-event", ChatEvent::Done { final_text: forced_text.clone() });
+        let assistant_msg_id = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .add_message(&assistant_msg_id, &request.conversation_id, "assistant", &forced_text)?;
+        return Ok(forced_text);
+    }
+
     let message_builder = MessageBuilder::new(
         config.clone(),
         settings.model.clone(),
@@ -751,6 +762,8 @@ Be concise and helpful. Explain what you're doing when using tools.{}"#, mcp_inf
 
     let client = reqwest::Client::new();
     let mut final_text = String::new();
+    let mut last_tool_output: Option<String> = None;
+    let mut tool_call_count: usize = 0;
     let mut turn = 0;
     let max_turns = config.max_turns;
 
@@ -1136,6 +1149,14 @@ Be concise and helpful. Explain what you're doing when using tools.{}"#, mcp_inf
 
         for tool_use in &tool_uses {
             let result = tool_executor.execute(tool_use).await;
+            tool_call_count += 1;
+            if !result.content.trim().is_empty() {
+                let mut summary = result.content.trim().to_string();
+                if summary.chars().count() > 1200 {
+                    summary = summary.chars().take(1200).collect::<String>() + "...";
+                }
+                last_tool_output = Some(summary);
+            }
 
             // Emit tool end
             let _ = window.emit("chat-event", ChatEvent::ToolEnd {
@@ -1152,6 +1173,22 @@ Be concise and helpful. Explain what you're doing when using tools.{}"#, mcp_inf
             role: "user".to_string(),
             content: AgentContent::ToolResults(tool_results),
         });
+    }
+
+    if final_text.trim().is_empty() {
+        final_text = if let Some(tool_output) = last_tool_output {
+            format!(
+                "I completed the tool execution but did not receive a final text response from the model.\n\nTool result summary:\n{}",
+                tool_output
+            )
+        } else if tool_call_count > 0 {
+            format!(
+                "I executed {} tool call(s), but the model returned an empty final response.",
+                tool_call_count
+            )
+        } else {
+            "The model returned an empty response for this request.".to_string()
+        };
     }
 
     // Emit done
@@ -1242,6 +1279,15 @@ pub async fn run_task_agent(
     // Update task status to running
     state.db.update_task_status(&request.task_id, "running")?;
 
+    if let Some(forced_text) = try_force_directory_listing(&state.mcp_manager, &request.message).await {
+        let assistant_msg_id = uuid::Uuid::new_v4().to_string();
+        let _ = state.db.add_task_message(&assistant_msg_id, &request.task_id, "assistant", &forced_text);
+        let _ = state.db.update_task_status(&request.task_id, "completed");
+        let _ = window.emit("agent-event", AgentEvent::Text { content: forced_text });
+        let _ = window.emit("agent-event", AgentEvent::Done { total_turns: 1 });
+        return Ok("Task completed successfully".to_string());
+    }
+
     // Build agent config with MCP servers info
     let mut config = AgentConfig::default();
 
@@ -1317,6 +1363,10 @@ pub async fn run_task_agent(
     // Track accumulated text for saving
     let accumulated_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let accumulated_text_clone = accumulated_text.clone();
+    let last_tool_output = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let last_tool_output_clone = last_tool_output.clone();
+    let tool_call_count = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let tool_call_count_clone = tool_call_count.clone();
 
     // Spawn event emitter with task tracking
     let window_clone = window.clone();
@@ -1344,6 +1394,20 @@ pub async fn run_task_agent(
                 AgentEvent::StepDone { step } => {
                     let _ = db.update_task_step(&task_id, *step, "completed");
                 }
+                AgentEvent::ToolEnd { result, .. } => {
+                    if let Ok(mut count) = tool_call_count_clone.lock() {
+                        *count += 1;
+                    }
+                    if !result.trim().is_empty() {
+                        let mut summary = result.trim().to_string();
+                        if summary.chars().count() > 1200 {
+                            summary = summary.chars().take(1200).collect::<String>() + "...";
+                        }
+                        if let Ok(mut last) = last_tool_output_clone.lock() {
+                            *last = Some(summary);
+                        }
+                    }
+                }
                 AgentEvent::Done { .. } => {
                     let _ = db.update_task_status(&task_id, "completed");
                 }
@@ -1366,10 +1430,28 @@ pub async fn run_task_agent(
 
     // Save assistant message with accumulated text
     let final_text = accumulated_text.lock().map(|t| t.clone()).unwrap_or_default();
-    if !final_text.is_empty() {
-        let assistant_msg_id = uuid::Uuid::new_v4().to_string();
-        let _ = db_for_msg.add_task_message(&assistant_msg_id, &task_id_for_msg, "assistant", &final_text);
-    }
+    let last_tool_output_text = last_tool_output.lock().ok().and_then(|v| v.clone());
+    let total_tool_calls = tool_call_count.lock().map(|c| *c).unwrap_or(0);
+    let resolved_final_text = if final_text.trim().is_empty() {
+        if let Some(tool_output) = last_tool_output_text {
+            format!(
+                "I completed the tool execution but did not receive a final text response from the model.\n\nTool result summary:\n{}",
+                tool_output
+            )
+        } else if total_tool_calls > 0 {
+            format!(
+                "I executed {} tool call(s), but the model returned an empty final response.",
+                total_tool_calls
+            )
+        } else {
+            "The model returned an empty response for this task.".to_string()
+        }
+    } else {
+        final_text
+    };
+
+    let assistant_msg_id = uuid::Uuid::new_v4().to_string();
+    let _ = db_for_msg.add_task_message(&assistant_msg_id, &task_id_for_msg, "assistant", &resolved_final_text);
 
     // Always ensure task status is updated at the end
     match result {
@@ -1409,13 +1491,82 @@ pub fn list_mcp_servers(state: State<'_, Arc<AppState>>) -> Result<Vec<MCPServer
 }
 
 #[command]
-pub fn save_mcp_server(
+pub async fn save_mcp_server(
     state: State<'_, Arc<AppState>>,
     config: MCPServerConfig,
 ) -> Result<(), CommandError> {
     state.db.save_mcp_server(&config).map_err(|e| CommandError {
         message: format!("Failed to save MCP server: {}", e)
-    })
+    })?;
+
+    // Auto-restart connected server to apply updated config immediately.
+    let should_restart = state
+        .mcp_manager
+        .get_server_statuses()
+        .await
+        .into_iter()
+        .any(|status| {
+            status.id == config.id
+                && matches!(
+                    status.status,
+                    crate::mcp::types::ConnectionStatus::Connected
+                        | crate::mcp::types::ConnectionStatus::Connecting
+                )
+        });
+
+    if should_restart {
+        state.mcp_manager.disconnect_server(&config.id).await;
+        if config.enabled {
+            state
+                .mcp_manager
+                .connect_server(&config)
+                .await
+                .map_err(|e| CommandError {
+                    message: format!("Server saved, but reconnect failed: {}", e),
+                })?;
+        }
+    }
+
+    Ok(())
+}
+
+#[command]
+pub async fn test_mcp_server_config(
+    state: State<'_, Arc<AppState>>,
+    mut config: MCPServerConfig,
+) -> Result<MCPServerStatus, CommandError> {
+    let test_id = format!("test-{}", uuid::Uuid::new_v4());
+    config.id = test_id.clone();
+    config.enabled = true;
+
+    state
+        .mcp_manager
+        .connect_server(&config)
+        .await
+        .map_err(|e| CommandError {
+            message: format!("MCP config test failed: {}", e),
+        })?;
+
+    let status = state
+        .mcp_manager
+        .get_server_statuses()
+        .await
+        .into_iter()
+        .find(|s| s.id == test_id)
+        .unwrap_or(MCPServerStatus {
+            id: test_id.clone(),
+            name: config.name.clone(),
+            transport: config.transport.clone(),
+            status: crate::mcp::types::ConnectionStatus::Disconnected,
+            tools: vec![],
+            last_error: Some("No status returned for test connection".to_string()),
+            managed_process: false,
+            pid: None,
+            endpoint: None,
+        });
+
+    state.mcp_manager.disconnect_server(&test_id).await;
+    Ok(status)
 }
 
 #[command]
@@ -1481,6 +1632,117 @@ pub async fn execute_mcp_tool(
     call: MCPToolCall,
 ) -> Result<MCPToolResult, CommandError> {
     Ok(state.mcp_manager.execute_tool(&call).await)
+}
+
+fn should_force_directory_listing_query(message: &str) -> bool {
+    let normalized = message.to_lowercase();
+    let targets = ["folders", "folder", "files", "file", "directories", "directory", "contents"];
+    let has_target = targets.iter().any(|t| normalized.contains(t));
+    if !has_target {
+        return false;
+    }
+
+    // Always force a tool call for file/folder listing-style intents.
+    let intent_terms = [
+        "list",
+        "show",
+        "display",
+        "view",
+        "what are",
+        "which",
+        "inside",
+        "in now",
+        "available",
+    ];
+    intent_terms.iter().any(|t| normalized.contains(t))
+}
+
+async fn try_force_directory_listing(
+    mcp_manager: &MCPManager,
+    message: &str,
+) -> Option<String> {
+    if !should_force_directory_listing_query(message) {
+        return None;
+    }
+
+    let connected = mcp_manager
+        .get_server_statuses()
+        .await
+        .into_iter()
+        .find(|s| {
+            matches!(s.status, crate::mcp::types::ConnectionStatus::Connected)
+                && s.tools.iter().any(|t| t.name == "list_directory")
+                && s.tools.iter().any(|t| t.name == "list_allowed_directories")
+        })?;
+
+    let allowed = mcp_manager
+        .execute_tool(&MCPToolCall {
+            server_id: connected.id.clone(),
+            tool_name: "list_allowed_directories".to_string(),
+            parameters: serde_json::json!({}),
+        })
+        .await;
+
+    if !allowed.success {
+        return Some(format!(
+            "I attempted to list directories using MCP, but failed to read allowed directories: {}",
+            allowed.error.unwrap_or_else(|| "unknown error".to_string())
+        ));
+    }
+
+    let allowed_text = extract_mcp_result_text(&allowed.result);
+    let root_path = extract_first_windows_path(&allowed_text).unwrap_or_else(|| ".".to_string());
+
+    let listed = mcp_manager
+        .execute_tool(&MCPToolCall {
+            server_id: connected.id.clone(),
+            tool_name: "list_directory".to_string(),
+            parameters: serde_json::json!({ "path": root_path }),
+        })
+        .await;
+
+    if !listed.success {
+        return Some(format!(
+            "Allowed directories:\n{}\n\nI attempted to list folders, but the tool call failed: {}",
+            allowed_text,
+            listed.error.unwrap_or_else(|| "unknown error".to_string())
+        ));
+    }
+
+    let listing_text = extract_mcp_result_text(&listed.result);
+    Some(format!(
+        "Allowed directories:\n{}\n\nDirectory listing:\n{}",
+        allowed_text, listing_text
+    ))
+}
+
+fn extract_mcp_result_text(value: &serde_json::Value) -> String {
+    if let Some(content_arr) = value.get("content").and_then(|v| v.as_array()) {
+        let mut out = Vec::new();
+        for item in content_arr {
+            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                out.push(text.to_string());
+            }
+        }
+        if !out.is_empty() {
+            return out.join("\n");
+        }
+    }
+
+    if let Some(text) = value
+        .get("structuredContent")
+        .and_then(|v| v.get("content"))
+        .and_then(|v| v.as_str())
+    {
+        return text.to_string();
+    }
+
+    value.to_string()
+}
+
+fn extract_first_windows_path(input: &str) -> Option<String> {
+    let re = Regex::new(r"[A-Za-z]:\\[^,\r\n]+").ok()?;
+    re.find(input).map(|m| m.as_str().trim().to_string())
 }
 
 /// Convert Claude API request format to OpenAI format

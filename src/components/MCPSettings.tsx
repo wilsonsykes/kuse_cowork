@@ -4,6 +4,7 @@ import {
   MCPServerStatus,
   listMCPServers,
   saveMCPServer,
+  testMCPServerConfig,
   deleteMCPServer,
   connectMCPServer,
   disconnectMCPServer,
@@ -15,12 +16,70 @@ interface MCPSettingsProps {
   onClose: () => void;
 }
 
+type MCPPreset = {
+  label: string;
+  transport: "http" | "stdio";
+  serverUrl?: string;
+  launchCommand?: string;
+  launchArgs?: string;
+  launchEnv?: string;
+  startupTimeoutMs?: string;
+};
+
+const MCP_PRESETS: MCPPreset[] = [
+  {
+    label: "Filesystem (local, stdio)",
+    transport: "stdio",
+    launchCommand: "mcp-server-filesystem.cmd",
+    launchArgs: "C:\\Users\\Administrator\\Desktop\\DevProj",
+    launchEnv: "{}",
+    startupTimeoutMs: "45000",
+  },
+  {
+    label: "Fetch (local, stdio)",
+    transport: "stdio",
+    launchCommand: "mcp-server-fetch.cmd",
+    launchArgs: "",
+    launchEnv: "{}",
+    startupTimeoutMs: "30000",
+  },
+  {
+    label: "Remote HTTP MCP",
+    transport: "http",
+    serverUrl: "https://your-mcp-server.com/mcp",
+    launchEnv: "{}",
+    startupTimeoutMs: "20000",
+  },
+];
+
+const looksLikePath = (value: string): boolean =>
+  /^[A-Za-z]:\\/.test(value) || value.startsWith("/") || value.startsWith("./") || value.startsWith("../");
+
+const getEffectiveRootPath = (server: MCPServerConfig): string | null => {
+  if (server.transport !== "stdio") {
+    return null;
+  }
+  const args = server.launch_args || [];
+  const nonFlags = args.filter((arg) => arg && !arg.startsWith("-"));
+  const pathInArgs = [...nonFlags].reverse().find((arg) => looksLikePath(arg));
+  if (pathInArgs) {
+    return pathInArgs;
+  }
+  if (server.working_dir) {
+    return server.working_dir;
+  }
+  return null;
+};
+
 const MCPSettings: Component<MCPSettingsProps> = (props) => {
   const [servers, setServers] = createSignal<MCPServerConfig[]>([]);
   const [statuses, setStatuses] = createSignal<MCPServerStatus[]>([]);
   const [showAddForm, setShowAddForm] = createSignal(false);
   const [editingServer, setEditingServer] = createSignal<MCPServerConfig | null>(null);
   const [loading, setLoading] = createSignal(false);
+  const [selectedPreset, setSelectedPreset] = createSignal("");
+  const [testingConfig, setTestingConfig] = createSignal(false);
+  const [testFeedback, setTestFeedback] = createSignal<{ ok: boolean; text: string } | null>(null);
 
   // Form state
   const [formData, setFormData] = createSignal({
@@ -82,6 +141,8 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
       oauthClientSecret: "",
     });
     setEditingServer(null);
+    setSelectedPreset("");
+    setTestFeedback(null);
     setShowAddForm(false);
   };
 
@@ -101,72 +162,119 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
       oauthClientSecret: server.oauth_client_secret || "",
     });
     setEditingServer(server);
+    setTestFeedback(null);
     setShowAddForm(true);
+  };
+
+  const applyPreset = () => {
+    const preset = MCP_PRESETS.find((p) => p.label === selectedPreset());
+    if (!preset) {
+      return;
+    }
+    setFormData((prev) => ({
+      ...prev,
+      transport: preset.transport,
+      serverUrl: preset.serverUrl ?? prev.serverUrl,
+      launchCommand: preset.launchCommand ?? prev.launchCommand,
+      launchArgs: preset.launchArgs ?? prev.launchArgs,
+      launchEnv: preset.launchEnv ?? prev.launchEnv,
+      startupTimeoutMs: preset.startupTimeoutMs ?? prev.startupTimeoutMs,
+    }));
+    setTestFeedback(null);
+  };
+
+  const buildConfigFromForm = (): MCPServerConfig | null => {
+    const data = formData();
+
+    if (!data.name.trim()) {
+      alert("Server name is required");
+      return null;
+    }
+
+    if (data.transport === "http" && !data.serverUrl.trim()) {
+      alert("Server URL is required for HTTP transport");
+      return null;
+    }
+
+    if (data.transport === "stdio" && !data.launchCommand.trim()) {
+      alert("Launch command is required for stdio transport");
+      return null;
+    }
+
+    let parsedEnv: Record<string, string> = {};
+    if (data.launchEnv.trim()) {
+      try {
+        const raw = JSON.parse(data.launchEnv);
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+          alert("Launch env must be a JSON object");
+          return null;
+        }
+        parsedEnv = Object.fromEntries(
+          Object.entries(raw).map(([k, v]) => [k, String(v)])
+        );
+      } catch {
+        alert("Launch env JSON is invalid");
+        return null;
+      }
+    }
+
+    const parsedTimeout = Number.parseInt(data.startupTimeoutMs.trim(), 10);
+    if (Number.isNaN(parsedTimeout) || parsedTimeout < 1000 || parsedTimeout > 120000) {
+      alert("Startup timeout must be between 1000 and 120000 ms");
+      return null;
+    }
+
+    const launchArgs = data.launchArgs
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    return {
+      id: editingServer()?.id || crypto.randomUUID(),
+      name: data.name,
+      transport: data.transport,
+      server_url: data.serverUrl.trim(),
+      launch_command: data.launchCommand.trim() || undefined,
+      launch_args: launchArgs,
+      launch_env: parsedEnv,
+      working_dir: data.workingDir.trim() || undefined,
+      startup_timeout_ms: parsedTimeout,
+      oauth_client_id: data.oauthClientId.trim() || undefined,
+      oauth_client_secret: data.oauthClientSecret.trim() || undefined,
+      enabled: editingServer()?.enabled ?? true,
+      created_at: editingServer()?.created_at || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  };
+
+  const handleTestConfig = async () => {
+    const config = buildConfigFromForm();
+    if (!config) {
+      return;
+    }
+    try {
+      setTestingConfig(true);
+      setTestFeedback(null);
+      const status = await testMCPServerConfig(config);
+      const ok = status.status === "Connected";
+      const details = ok
+        ? `Success. Connected and discovered ${status.tools.length} tool(s).`
+        : `Connection failed: ${status.last_error || "unknown error"}`;
+      setTestFeedback({ ok, text: details });
+    } catch (err) {
+      console.error("Failed to test server config:", err);
+      setTestFeedback({ ok: false, text: "Failed to test configuration. Check logs and command path." });
+    } finally {
+      setTestingConfig(false);
+    }
   };
 
   const handleSave = async () => {
     try {
-      const data = formData();
-
-      if (!data.name.trim()) {
-        alert("Server name is required");
+      const config = buildConfigFromForm();
+      if (!config) {
         return;
       }
-
-      if (data.transport === "http" && !data.serverUrl.trim()) {
-        alert("Server URL is required for HTTP transport");
-        return;
-      }
-
-      if (data.transport === "stdio" && !data.launchCommand.trim()) {
-        alert("Launch command is required for stdio transport");
-        return;
-      }
-
-      let parsedEnv: Record<string, string> = {};
-      if (data.launchEnv.trim()) {
-        try {
-          const raw = JSON.parse(data.launchEnv);
-          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-            alert("Launch env must be a JSON object");
-            return;
-          }
-          parsedEnv = Object.fromEntries(
-            Object.entries(raw).map(([k, v]) => [k, String(v)])
-          );
-        } catch {
-          alert("Launch env JSON is invalid");
-          return;
-        }
-      }
-
-      const parsedTimeout = Number.parseInt(data.startupTimeoutMs.trim(), 10);
-      if (Number.isNaN(parsedTimeout) || parsedTimeout < 1000 || parsedTimeout > 120000) {
-        alert("Startup timeout must be between 1000 and 120000 ms");
-        return;
-      }
-
-      const launchArgs = data.launchArgs
-        .split(/\s+/)
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-      const config: MCPServerConfig = {
-        id: editingServer()?.id || crypto.randomUUID(),
-        name: data.name,
-        transport: data.transport,
-        server_url: data.serverUrl.trim(),
-        launch_command: data.launchCommand.trim() || undefined,
-        launch_args: launchArgs,
-        launch_env: parsedEnv,
-        working_dir: data.workingDir.trim() || undefined,
-        startup_timeout_ms: parsedTimeout,
-        oauth_client_id: data.oauthClientId.trim() || undefined,
-        oauth_client_secret: data.oauthClientSecret.trim() || undefined,
-        enabled: editingServer()?.enabled ?? true,
-        created_at: editingServer()?.created_at || new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
 
       await saveMCPServer(config);
       await refreshData();
@@ -235,6 +343,23 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
         {showAddForm() && (
           <div class="add-form">
             <h3>{editingServer() ? "Edit Server" : "Add MCP Server"}</h3>
+            <div class="form-group">
+              <label>Preset template</label>
+              <div class="preset-row">
+                <select
+                  value={selectedPreset()}
+                  onInput={(e) => setSelectedPreset(e.currentTarget.value)}
+                >
+                  <option value="">Custom</option>
+                  <For each={MCP_PRESETS}>{(preset) => (
+                    <option value={preset.label}>{preset.label}</option>
+                  )}</For>
+                </select>
+                <button class="template-btn" onClick={applyPreset} disabled={!selectedPreset()}>
+                  Apply Template
+                </button>
+              </div>
+            </div>
 
             <div class="form-group">
               <label>Name</label>
@@ -360,11 +485,19 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
             </div>
 
             <div class="form-actions">
+              <button class="test-btn" onClick={handleTestConfig} disabled={testingConfig()}>
+                {testingConfig() ? "Testing..." : "Test Config"}
+              </button>
               <button class="save-btn" onClick={handleSave}>
                 {editingServer() ? "Update" : "Add"}
               </button>
               <button class="cancel-btn" onClick={resetForm}>Cancel</button>
             </div>
+            {testFeedback() && (
+              <div class={`test-feedback ${testFeedback()!.ok ? "ok" : "error"}`}>
+                {testFeedback()!.text}
+              </div>
+            )}
           </div>
         )}
 
@@ -428,6 +561,12 @@ const MCPSettings: Component<MCPSettingsProps> = (props) => {
                       {status?.endpoint && (
                         <div class="detail-row">
                           <strong>Endpoint:</strong> {status.endpoint}
+                        </div>
+                      )}
+
+                      {getEffectiveRootPath(server) && (
+                        <div class="detail-row">
+                          <strong>Effective root path:</strong> {getEffectiveRootPath(server)}
                         </div>
                       )}
 
